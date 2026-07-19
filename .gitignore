@@ -1,0 +1,41 @@
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+notebooks/
+
+# --- Streamlit ---
+.streamlit/secrets.toml
+
+# --- Open-Meteo APIキャッシュ ---
+.cache/
+.cache.sqlite
+
+# --- 生データ・NEMOSISキャッシュ（重い・再生成可能なので除外） ---
+data/raw/aemo_data_1year/
+data/raw/nemosis_cache/
+data/raw/*.csv
+
+# --- 静的HTMLダッシュボード（Streamlitアプリと重複するため除外） ---
+data/processed/rrp_dashboard.html
+
+# --- data/processed/ のparquet, csv（予測結果）は追跡対象のまま（除外しない） ---
+# cleansed_aemo_NSW_2025.parquet と rrp_dual_prediction_output.csv は
+# ダッシュボードが直接読み込むため、リポジトリに含める
+
+# --- OS / エディタ ---
+.DS_Store
+Thumbs.db
+.vscode/
+*.swp
+
+# --- 環境変数・秘密情報 ---
+.env
+*.pem

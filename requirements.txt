@@ -1,0 +1,14 @@
+beautifulsoup4==4.14.3
+holidays==0.99
+lightgbm==4.6.0
+nemosis==3.8.1
+numpy==2.4.3
+openmeteo_requests==1.7.5
+pandas==3.0.1
+plotly==6.9.0
+pyarrow==24.0.0
+requests==2.33.1
+requests-cache==1.3.3
+retry-requests==2.0.0
+scikit-learn==1.8.0
+streamlit==1.59.2
