@@ -18,17 +18,17 @@ notebooks/
 .cache/
 .cache.sqlite
 
-# --- 生データ・NEMOSISキャッシュ（重い・再生成可能なので除外） ---
-data/raw/aemo_data_1year/
+# --- NEMOSISキャッシュ（巨大・再生成可能なので除外） ---
 data/raw/nemosis_cache/
-data/raw/*.csv
+
+# --- AEMOの単発検証用CSV（sydney_weather.csv等）は除外。price/demandのCSVは含める ---
+data/raw/sydney_weather.csv
 
 # --- 静的HTMLダッシュボード（Streamlitアプリと重複するため除外） ---
 data/processed/rrp_dashboard.html
 
-# --- data/processed/ のparquet, csv（予測結果）は追跡対象のまま（除外しない） ---
-# cleansed_aemo_NSW_2025.parquet と rrp_dual_prediction_output.csv は
-# ダッシュボードが直接読み込むため、リポジトリに含める
+# --- data/raw/aemo_data_1year/ は GitHub Actions実行のため含める（.gitignoreしない） ---
+# --- data/processed/ のparquet, csvも含める ---
 
 # --- OS / エディタ ---
 .DS_Store

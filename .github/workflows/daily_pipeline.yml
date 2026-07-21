@@ -1,0 +1,38 @@
+name: Daily Pipeline Run
+
+on:
+  schedule:
+    # UTC 20:00 = シドニー時間 早朝6:00頃（サマータイムにより多少前後）
+    - cron: "0 20 * * *"
+  workflow_dispatch: {}  # GitHubのUIから手動実行もできるようにする
+
+permissions:
+  contents: write  # パイプラインの出力結果をリポジトリにpushし返すために必要
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        run: python main.py
+
+      - name: Commit and push updated outputs
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/processed/
+          git diff --cached --quiet || git commit -m "Automated pipeline run: update predictions"
+          git push
