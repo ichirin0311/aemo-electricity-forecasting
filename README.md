@@ -6,7 +6,7 @@ demand using AEMO market data, Bureau of Meteorology-sourced weather data
 Streamlit dashboard that translates model predictions into a business
 risk-hedging scenario.
 
-**[Live Dashboard](#)** ← replace with your Streamlit Community Cloud URL once deployed
+**[Live Dashboard](https://aemo-electricity-forecasting-xhtf7sj4xqjesgknueoqza.streamlit.app/)** 
 
 ## What this project does
 
