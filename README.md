@@ -19,6 +19,15 @@ tight. This project builds a forecasting system that:
 3. Simulates the cost impact of a simple risk-hedging strategy based on
    these predictions
 
+
+## Current limitations & roadmap
+
+This pipeline currently retrains on a fixed 2025 dataset daily via GitHub
+Actions (functioning as an automated regression test to catch API/schema
+changes early). A planned v2 will shift to a rolling window with automated
+AEMO data ingestion and true next-day price forecasting.
+
+
 ## Pipeline overview
 
 ```
