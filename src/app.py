@@ -32,11 +32,13 @@ def compute_kpis(df: pd.DataFrame, spike_threshold: float) -> dict:
 
 def simulate_hedging_strategy(df: pd.DataFrame, risk_threshold: float, hedge_ratio: float) -> pd.DataFrame:
     df = df.copy()
-    df["cost_naive"] = df["rrp_actual"] * df["totaldemand"]
+    INTERVAL_HOURS = 5 / 60  # 5分足なので、MW→MWh変換のため時間換算
+
+    df["cost_naive"] = df["rrp_actual"] * df["totaldemand"] * INTERVAL_HOURS
 
     is_high_risk = df["rrp_risk_ceiling"] >= risk_threshold
     hedged_demand = np.where(is_high_risk, df["totaldemand"] * (1 - hedge_ratio), df["totaldemand"])
-    df["cost_hedged"] = df["rrp_actual"] * hedged_demand
+    df["cost_hedged"] = df["rrp_actual"] * hedged_demand * INTERVAL_HOURS
 
     df["cumulative_cost_naive"] = df["cost_naive"].cumsum()
     df["cumulative_cost_hedged"] = df["cost_hedged"].cumsum()
