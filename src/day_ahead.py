@@ -236,6 +236,17 @@ def predict_lead(models: dict, rows: pd.DataFrame) -> pd.DataFrame:
 
 # ---------------------------------------------------------------- orchestration
 
+def assemble_frame(actuals: pd.DataFrame, region: str, cutoff: pd.Timestamp,
+                   horizon_end: pd.Timestamp, lat: float, lon: float) -> pd.DataFrame:
+    """Actuals up to the cutoff + empty future rows up to horizon_end, with temperature and calendar."""
+    future = pd.DataFrame({"settlementdate": pd.date_range(
+        cutoff + pd.Timedelta(minutes=5), horizon_end, freq="5min")})
+    df = pd.concat([actuals, future], ignore_index=True)
+    temp = load_temperature(df["settlementdate"].min() - pd.Timedelta(minutes=5), horizon_end, cutoff, lat, lon)
+    df = df.merge(temp.rename_axis("settlementdate").reset_index(), on="settlementdate", how="left")
+    return add_calendar(df, region)
+
+
 def latest_cutoff(actuals: pd.DataFrame) -> pd.Timestamp:
     """The end of the latest complete trading day in the data (a 00:00 timestamp)."""
     last = actuals["settlementdate"].max()
@@ -262,13 +273,7 @@ def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
     actuals = actuals[actuals["settlementdate"] <= cutoff]
 
     horizon_end = cutoff + pd.Timedelta(days=max(LEADS.values()))
-    future = pd.DataFrame({"settlementdate": pd.date_range(
-        cutoff + pd.Timedelta(minutes=5), horizon_end, freq="5min")})
-    df = pd.concat([actuals, future], ignore_index=True)
-
-    temp = load_temperature(df["settlementdate"].min() - pd.Timedelta(minutes=5), horizon_end, cutoff, lat, lon)
-    df = df.merge(temp.rename_axis("settlementdate").reset_index(), on="settlementdate", how="left")
-    df = add_calendar(df, region)
+    df = assemble_frame(actuals, region, cutoff, horizon_end, lat, lon)
 
     issue_day = cutoff.normalize()
     forecasts, report = [], {"cutoff": cutoff}
