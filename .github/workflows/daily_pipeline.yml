@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Test AEMO download from Actions
+        run: python -c "from src.aemo_downloader import download_price_and_demand as d; print(d('NSW1', ['202609'], '/tmp/aemo_test'))"
+
       - name: Run pipeline
         run: python main.py
 
