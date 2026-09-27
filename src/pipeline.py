@@ -1,8 +1,4 @@
 import os
-import glob
-import urllib.request
-import requests
-from bs4 import BeautifulSoup
 import pandas as pd
 import numpy as np
 import holidays
@@ -10,6 +6,8 @@ import openmeteo_requests
 import requests_cache
 from retry_requests import retry
 from nemosis import dynamic_data_compiler
+
+from src.aemo_downloader import download_price_and_demand
 
 
 class AEMODataPipeline:
@@ -21,6 +19,9 @@ class AEMODataPipeline:
         self.year = str(year)         # e.g. '2025'
         self.download_dir = download_dir
         os.makedirs(self.download_dir, exist_ok=True)
+
+        # Local store for AEMO monthly price/demand CSVs (auto-downloaded)
+        self.aemo_raw_dir = os.path.join("data", "raw", "aemo_data_1year")
 
         # Cache location for NEMOSIS
         self.nemosis_cache = os.path.join("data", "raw", "nemosis_cache")
@@ -34,10 +35,16 @@ class AEMODataPipeline:
 
     def fetch_aemo_data(self) -> pd.DataFrame:
         print(f"--- [Step 1] Starting collection of {self.year} AEMO data ---")
-        csv_files = glob.glob(os.path.join("data","raw","aemo_data_1year", "*PRICE_AND_DEMAND*.csv"))
+        # Download (or reuse cached) monthly PRICE_AND_DEMAND CSVs for the target year
+        months = [f"{self.year}{m:02d}" for m in range(1, 13)]
+        csv_files = download_price_and_demand(
+            region_id=f"{self.region}1",
+            months=months,
+            dest_dir=self.aemo_raw_dir,
+        )
 
         if not csv_files:
-            raise FileNotFoundError("No AEMO CSV files found in the specified folder.")
+            raise FileNotFoundError(f"No AEMO CSV files available for {self.year} in {self.aemo_raw_dir}.")
 
         dfs = []
         for file in csv_files:
