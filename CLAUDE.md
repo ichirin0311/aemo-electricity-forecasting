@@ -190,6 +190,11 @@ the most time-consuming step. Before committing to it, it's recommended to
 first verify at small scale that 2023-2024 AEMO CSVs can be fetched without
 issue in the same URL format.
 
+> **Update (2026-09):** AEMO CSV ingestion is now automated (see "AEMO CSV
+> Ingestion Automated" below), and 2023 CSVs were confirmed to be downloadable
+> from the same URL format, so the manual-download concern above no longer
+> applies. The NEMOSIS volume concern still does.
+
 ### 3. Be careful about the sample size behind the Phase 1 evaluation
 
 Phase 1 plans to measure the effect of parameter changes
@@ -266,4 +271,36 @@ tension with each other, and the right call depends on the use case (whether
 it needs to function as a strict risk ceiling, or should prioritize staying
 close to actual prices).
 
+## AEMO CSV Ingestion Automated (2026-09)
+
+`fetch_aemo_data` no longer relies on manually placed CSVs. `src/aemo_downloader.py`
+downloads the monthly `PRICE_AND_DEMAND_{YYYYMM}_{REGION}.csv` files into
+`data/raw/aemo_data_1year/`, and the GitHub Actions workflow commits any new CSVs
+back to the repo.
+
+Findings from the investigation:
+- The URL `https://www.aemo.com.au/aemo/data/nem/priceanddemand/PRICE_AND_DEMAND_{YYYYMM}_NSW1.csv`
+  still works and returns files byte-identical to the manually downloaded ones.
+  The bare `aemo.com.au` host 301-redirects to `www`.
+- **The earlier HTTP 403s were caused by Python's `urllib` default User-Agent
+  (`Python-urllib`)**, which Cloudflare blocks. `requests` (and browser-like UAs)
+  get 200. Confirmed working from GitHub Actions runners too.
+- The current month is available as a partial file (up to the latest day);
+  future months return 404.
+
+Downloader behavior: closed months that already exist locally are not re-downloaded;
+the current and previous month are always refreshed; on download failure an existing
+local copy is used so a transient outage doesn't break the daily run.
+
+The NEMOSIS cache (`data/raw/nemosis_cache/`, gitignored) is persisted between
+Actions runs via `actions/cache`, and only the feather copies are kept
+(`keep_csv=False`, ~120MB instead of ~388MB for 14 months).
+
 ## Not Yet Started / Future Candidates (Updated)
+
+Remaining blockers for v2 (rolling window / next-period forecasting):
+- `train.py` splits by calendar month (Jan-Oct / Nov / Dec) and `main.py`
+  hardcodes `year="2025"`
+- NEMOSIS reads the monthly MMSDM archive, which is published with a lag of
+  several weeks, so recent `availablegeneration` is not available through it
+- The Open-Meteo archive API lags real time by several days

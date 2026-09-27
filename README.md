@@ -24,8 +24,9 @@ tight. This project builds a forecasting system that:
 
 This pipeline currently retrains on a fixed 2025 dataset daily via GitHub
 Actions (functioning as an automated regression test to catch API/schema
-changes early). A planned v2 will shift to a rolling window with automated
-AEMO data ingestion and true next-day price forecasting.
+changes early). AEMO price/demand CSVs are now downloaded automatically
+(`src/aemo_downloader.py`). A planned v2 will shift to a rolling window and
+true next-day price forecasting.
 
 
 ## Pipeline overview
@@ -79,9 +80,11 @@ python -m streamlit run src/app.py
 
 ### Option 2: Run the full pipeline (fetch fresh data, retrain models)
 
-Requires AEMO Price and Demand CSVs placed in `data/raw/aemo_data_1year/`
-(download from [AEMO's data portal](https://aemo.com.au)). First-time
-NEMOSIS capacity data collection may take significant time.
+AEMO Price and Demand CSVs are downloaded automatically into
+`data/raw/aemo_data_1year/` from [AEMO](https://www.aemo.com.au)'s monthly
+aggregated price and demand data (already-downloaded closed months are
+reused). First-time NEMOSIS capacity data collection may take significant
+time.
 
 ​```bash
 pip install -r requirements.txt

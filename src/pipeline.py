@@ -116,7 +116,8 @@ class AEMODataPipeline:
             raw_data_location=self.nemosis_cache,
             filter_cols=['REGIONID'],
             filter_values=([region_id],),
-            select_columns=['SETTLEMENTDATE', 'REGIONID', 'AVAILABLEGENERATION', 'DISPATCHABLEGENERATION']
+            select_columns=['SETTLEMENTDATE', 'REGIONID', 'AVAILABLEGENERATION', 'DISPATCHABLEGENERATION'],
+            keep_csv=False  # keep only the feather copy (~1/3 the size) so the cache is cheap to persist in CI
         )
 
         df_capacity = df_capacity.rename(columns={'SETTLEMENTDATE': 'settlementdate'})
