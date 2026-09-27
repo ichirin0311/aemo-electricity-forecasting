@@ -162,7 +162,9 @@ def train_and_evaluate_models(parquet_path: str, output_dir: str = "data/process
     df_output["rrp_risk_ceiling"] = pred_q90_original
 
     output_path = f"{output_dir}/rrp_dual_prediction_output.csv"
-    df_output.to_csv(output_path, index=False)
+    # Round predictions: GitHub Actions runners vary in CPU type, which changes the last
+    # 1-2 floating-point digits between runs and would otherwise create a no-op commit daily
+    df_output.to_csv(output_path, index=False, float_format="%.6f")
     print(f"🎉 Dual-axis prediction results saved to: {output_path}")
     print(df_output.head())
 
