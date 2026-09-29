@@ -46,8 +46,15 @@ RRP_ASINH_COLS = ["rrp_same_time_latest", "rrp_same_time_7d", "rrp_day_mean", "r
 # Same hyperparameters as the v1 models in src/train.py
 PARAMS_DEMAND = {"objective": "regression", "metric": "rmse", "learning_rate": 0.05,
                  "num_leaves": 31, "seed": 42, "verbose": -1}
-PARAMS_BASE = {"objective": "regression", "metric": "rmse", "learning_rate": 0.03,
+# Central model: L1 on asinh(rrp / 100). The v1-style L2 on asinh(rrp) under-predicted in every
+# month of the walk-forward (bias about -16 $/MWh) because negative prices pull the asinh-space
+# mean far down; L1 predicts the median, which the inverse transform preserves.
+# See experiments/price_target_bias.py (normal MAE 31.87 -> 27.92, today lead).
+PARAMS_BASE = {"objective": "regression_l1", "metric": "l1", "learning_rate": 0.03,
                "num_leaves": 15, "min_data_in_leaf": 100, "seed": 42, "verbose": -1}
+BASE_SCALE = 100.0
+# Q90 model keeps asinh(rrp): scaling its target worsened spike MAE (1917 -> 2039)
+Q90_SCALE = 1.0
 PARAMS_Q90 = {"objective": "quantile", "alpha": 0.9, "metric": "quantile", "learning_rate": 0.05,
               "num_leaves": 31, "seed": 42, "verbose": -1}
 
@@ -186,11 +193,16 @@ def _fit(params, X_tr, y_tr, X_va, y_va):
 
 
 def train_lead_models(df_feat: pd.DataFrame, cutoff: pd.Timestamp,
-                      train_days: int = 365, val_days: int = 28) -> tuple[dict, dict]:
+                      train_days: int = 365, val_days: int = 28,
+                      base_scale: float = BASE_SCALE, q90_scale: float = Q90_SCALE,
+                      base_params: dict | None = None) -> tuple[dict, dict]:
     """
     Train demand / central price / Q90 models on the train_days before the cutoff;
     the last val_days are held out for early stopping and reported as metrics.
+    Price targets are modelled as asinh(rrp / scale), with separate scales for the
+    central and Q90 models.
     """
+    base_params = base_params or PARAMS_BASE
     hist = df_feat[(df_feat["settlementdate"] <= cutoff)
                    & (df_feat["settlementdate"] > cutoff - pd.Timedelta(days=train_days))]
     hist = hist.dropna(subset=RRP_FEATURES + ["rrp", "totaldemand"])
@@ -200,21 +212,21 @@ def train_lead_models(df_feat: pd.DataFrame, cutoff: pd.Timestamp,
     models = {
         "demand": _fit(PARAMS_DEMAND, tr[DEMAND_FEATURES], tr["totaldemand"],
                        va[DEMAND_FEATURES], va["totaldemand"]),
-        "base": _fit(PARAMS_BASE, price_inputs(tr), np.arcsinh(tr["rrp"]),
-                     price_inputs(va), np.arcsinh(va["rrp"])),
-        "q90": _fit(PARAMS_Q90, price_inputs(tr), np.arcsinh(tr["rrp"]),
-                    price_inputs(va), np.arcsinh(va["rrp"])),
+        "base": _fit(base_params, price_inputs(tr), np.arcsinh(tr["rrp"] / base_scale),
+                     price_inputs(va), np.arcsinh(va["rrp"] / base_scale)),
+        "q90": _fit(PARAMS_Q90, price_inputs(tr), np.arcsinh(tr["rrp"] / q90_scale),
+                    price_inputs(va), np.arcsinh(va["rrp"] / q90_scale)),
+        "base_scale": base_scale, "q90_scale": q90_scale,
     }
 
     # Validation metrics (last val_days) for monitoring
     y = va["rrp"].values
-    base = np.sinh(models["base"].predict(price_inputs(va), num_iteration=models["base"].best_iteration))
-    q90 = np.sinh(models["q90"].predict(price_inputs(va), num_iteration=models["q90"].best_iteration))
+    pred = predict_lead(models, va)
+    base, q90 = pred["rrp_base_prediction"].values, pred["rrp_risk_ceiling"].values
     normal = y < SPIKE
     metrics = {
         "train_rows": len(tr), "val_rows": len(va),
-        "demand_R2": r2_score(va["totaldemand"], models["demand"].predict(
-            va[DEMAND_FEATURES], num_iteration=models["demand"].best_iteration)),
+        "demand_R2": r2_score(va["totaldemand"], pred["demand_forecast"]),
         "normal_MAE": mean_absolute_error(y[normal], base[normal]),
         "normal_R2": r2_score(y[normal], base[normal]) if normal.sum() > 1 else np.nan,
         "q90_coverage": (y <= q90).mean(),
@@ -227,9 +239,9 @@ def predict_lead(models: dict, rows: pd.DataFrame) -> pd.DataFrame:
     out = rows[["settlementdate"]].copy()
     out["demand_forecast"] = models["demand"].predict(
         rows[DEMAND_FEATURES], num_iteration=models["demand"].best_iteration)
-    out["rrp_base_prediction"] = np.sinh(models["base"].predict(
+    out["rrp_base_prediction"] = models["base_scale"] * np.sinh(models["base"].predict(
         price_inputs(rows), num_iteration=models["base"].best_iteration))
-    out["rrp_risk_ceiling"] = np.sinh(models["q90"].predict(
+    out["rrp_risk_ceiling"] = models["q90_scale"] * np.sinh(models["q90"].predict(
         price_inputs(rows), num_iteration=models["q90"].best_iteration))
     return out
 

@@ -41,22 +41,21 @@ def metrics(df: pd.DataFrame) -> dict:
     }
 
 
-if __name__ == "__main__":
-    first = pd.Period(sys.argv[1] if len(sys.argv) > 1 else "2025-01", freq="M")
-    last = pd.Period(sys.argv[2] if len(sys.argv) > 2 else "2026-08", freq="M")
-    months = pd.period_range(first, last, freq="M")
-
+def load_backtest_frame(first: pd.Period, last: pd.Period) -> pd.DataFrame:
     start = first.start_time - pd.Timedelta(days=TRAIN_DAYS + 7 + max(LEADS.values()) + 1)
     end = (last + 1).start_time  # last interval of the last month is 00:00 of the next month
     actuals = load_aemo_actuals(f"{REGION}1", start, end)
-    df = assemble_frame(actuals, REGION, cutoff=end, horizon_end=end, lat=LAT, lon=LON)
+    return assemble_frame(actuals, REGION, cutoff=end, horizon_end=end, lat=LAT, lon=LON)
 
+
+def walk_forward(df: pd.DataFrame, months, leads=LEADS, verbose=True, **train_kwargs):
+    """Monthly-retrained walk-forward. Returns (monthly metrics, all predictions)."""
     preds, rows = [], []
-    for lead_name, lead_days in LEADS.items():
+    for lead_name, lead_days in leads.items():
         feat = build_features(df, lead_days)
         for month in months:
             cutoff = month.start_time
-            models, _ = train_lead_models(feat, cutoff, train_days=TRAIN_DAYS)
+            models, _ = train_lead_models(feat, cutoff, train_days=TRAIN_DAYS, **train_kwargs)
             target = feat[(feat["settlementdate"] > cutoff)
                           & (feat["settlementdate"] <= (month + 1).start_time)].dropna()
             p = predict_lead(models, target)
@@ -67,14 +66,21 @@ if __name__ == "__main__":
             p.insert(0, "month", str(month))
             preds.append(p)
             rows.append({"month": str(month), "lead": lead_name, **metrics(p)})
-            print(f"{lead_name:8s} {month}: normal MAE={rows[-1]['normal_MAE']:.2f} "
-                  f"(naive {rows[-1]['normal_MAE_naive']:.2f}), coverage={rows[-1]['q90_coverage']:.3f}, "
-                  f"spikes={rows[-1]['spikes']}")
+            if verbose:
+                print(f"{lead_name:8s} {month}: normal MAE={rows[-1]['normal_MAE']:.2f} "
+                      f"(naive {rows[-1]['normal_MAE_naive']:.2f}), coverage={rows[-1]['q90_coverage']:.3f}, "
+                      f"spikes={rows[-1]['spikes']}")
+    return pd.DataFrame(rows), pd.concat(preds, ignore_index=True)
+
+
+if __name__ == "__main__":
+    first = pd.Period(sys.argv[1] if len(sys.argv) > 1 else "2025-01", freq="M")
+    last = pd.Period(sys.argv[2] if len(sys.argv) > 2 else "2026-08", freq="M")
+    df = load_backtest_frame(first, last)
+    monthly, all_preds = walk_forward(df, pd.period_range(first, last, freq="M"))
 
     os.makedirs(OUT_DIR, exist_ok=True)
-    monthly = pd.DataFrame(rows)
     monthly.to_csv(os.path.join(OUT_DIR, "walk_forward_monthly.csv"), index=False, float_format="%.6f")
-    all_preds = pd.concat(preds, ignore_index=True)
     all_preds.to_parquet(os.path.join(OUT_DIR, "walk_forward_predictions.parquet"), index=False)
 
     pd.set_option("display.width", 160)

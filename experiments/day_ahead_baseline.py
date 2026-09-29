@@ -35,6 +35,8 @@ from src.day_ahead import (  # noqa: E402  (features/params shared with producti
 )
 
 PARQUET = "data/processed/cleansed_aemo_NSW_2025.parquet"
+# This experiment predates the L1 / scaled-asinh central model; keep its original L2 setup
+PARAMS_BASE = {**PARAMS_BASE, "objective": "regression", "metric": "rmse"}
 
 
 def fit_predict(params, X_tr, y_tr, X_va, y_va, X_te):

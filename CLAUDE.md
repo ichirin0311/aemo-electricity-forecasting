@@ -296,11 +296,67 @@ The NEMOSIS cache (`data/raw/nemosis_cache/`, gitignored) is persisted between
 Actions runs via `actions/cache`, and only the feather copies are kept
 (`keep_csv=False`, ~120MB instead of ~388MB for 14 months).
 
+## v2: Rolling Day-Ahead Forecast (2026-09)
+
+v1 (`main.py`, `src/train.py`) stays as is. v2 runs alongside it:
+`src/day_ahead.py` + `run_day_ahead.py` (daily in Actions, output `data/forecasts/`),
+`run_backtest.py` (walk-forward evaluation).
+
+### Why v1's metrics don't carry over
+The v1 price model uses **same-interval actuals** (`totaldemand`,
+`availablegeneration`, `reserve_margin*`, actual temperature) and lags as short
+as 5 minutes (`rrp_volatility_1h`). None of these are known when a forecast is
+issued in advance, so v1's normal R2=0.5667 is closer to a nowcast. Its top
+3 features by gain are all of this kind.
+
+### Forecast definition
+- Issued each morning (Actions cron UTC 20:00 = 06:00 market time). AEMO's
+  PRICE_AND_DEMAND CSV is refreshed at 00:00 market time, so actuals are
+  complete up to D 00:00.
+- Two leads, each with its own demand / central / Q90 models:
+  `today` (day D, 6-24h ahead) and `tomorrow` (day D+1, 24-48h ahead).
+- Features use only actuals up to the end of day T - lead: same time-of-day
+  on the latest complete day and 7 days earlier, daily price/demand stats of
+  the latest complete day (+7-day means), calendar, temperature (forecast API
+  for future hours; archive actuals in backtests).
+- **No demand/capacity inputs for the target interval** (deliberate decision).
+  AEMO PREDISPATCH forecasts are the planned next addition. As a side effect
+  v2 does not depend on NEMOSIS.
+- Rolling window: trained on the 365 days before the cutoff, last 28 days for
+  early stopping / monitoring.
+
+### Walk-forward evaluation (2025-01..2026-08, monthly retrain)
+Central model after the fix below, pooled over 20 months:
+
+| Lead | Normal MAE | Normal R2 | Naive normal MAE | Months beating naive | Q90 coverage |
+|---|---|---|---|---|---|
+| today | 27.92 | 0.531 | 42.70 | 20/20 | 87.8% |
+| tomorrow | 30.86 | 0.449 | 51.44 | 20/20 | 89.4% |
+
+(Naive = same time on the latest complete day.) Spike magnitude is not
+predictable at these horizons: spike MAE (~1,900) is close to naive (~2,050-2,150).
+Q90 coverage is close to 90% pooled but ranges 76-97% by month.
+
+### Fix: asinh + L2 under-predicted systematically
+With the v1 setup (L2 on asinh(rrp)) the central model under-predicted in
+**every** month (pooled bias about -16 $/MWh, worst -36 in Jun 2026). In asinh
+space +$80 and -$30 are far apart (5.1 vs -4.1), so negative prices (21-30% of
+intervals in late 2025) pull the mean down hard, and 2026 had almost none, so
+the gap widened. Compared in `experiments/price_target_bias.py`:
+- `asinh(x/30)` / `asinh(x/100)` with L2, and L1 on `asinh(x)`, all helped
+- **Adopted: central = L1 (median) on asinh(rrp/100)**. Median survives the
+  inverse transform unbiased. Normal MAE 31.87 -> 27.92 (today), bias -16.4 -> -0.2.
+- The Q90 model keeps asinh(rrp): scaling its target worsened spike MAE
+  (1917 -> 2039).
+
+Note this does not contradict the earlier "asinh, not log" decision; it is
+still asinh, just with a scale and a median objective.
+
 ## Not Yet Started / Future Candidates (Updated)
 
-Remaining blockers for v2 (rolling window / next-period forecasting):
-- `train.py` splits by calendar month (Jan-Oct / Nov / Dec) and `main.py`
-  hardcodes `year="2025"`
-- NEMOSIS reads the monthly MMSDM archive, which is published with a lag of
-  several weeks, so recent `availablegeneration` is not available through it
-- The Open-Meteo archive API lags real time by several days
+- Switch the dashboard (`src/app.py`) to v2: upcoming forecast (central + Q90)
+  plus the live track record from `data/forecasts/forecast_log.csv`
+- Add AEMO PREDISPATCH (forecast demand / available generation / price) as
+  inputs, and as a benchmark to compare against
+- v1 is still the one described in the README metrics; clarify there that its
+  numbers use same-interval actuals
