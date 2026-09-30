@@ -1,203 +1,389 @@
 # src/app.py
-import streamlit as st
-import pandas as pd
-import numpy as np
-import plotly.graph_objects as go
-from sklearn.metrics import mean_absolute_error, r2_score
+# v2 dashboard: day-ahead outlook, live track record, market regime monitoring and a
+# walk-forward risk-strategy backtest. Data logic lives in src/dashboard_data.py.
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-st.set_page_config(page_title="AEMO NSW1 Electricity Price Risk Management Dashboard", layout="wide")
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.dashboard_data import (CURRENT_MODEL_SINCE, LEAD_DAYS, alert_quality, load_actuals,  # noqa: E402
+                                load_backtest, load_forecasts, monthly_regime, period_profile,
+                                price_metrics, score_forecast_log, simulate_hedging_strategy, spike_drift)
+
+st.set_page_config(page_title="AEMO NSW1 Price Outlook & Risk Dashboard", layout="wide")
+
+# Colors that read on both light and dark themes
+C_ACTUAL, C_CENTRAL, C_RISK = "#8c8c8c", "#4c78a8", "#f58518"
+C_NAIVE, C_HEDGED, C_A, C_B = "#e45756", "#54a24b", "#9d755d", "#4c78a8"
+MARKET_TZ = timezone(timedelta(hours=10))  # AEMO market time: fixed UTC+10, no DST
+
+
+# ==================== Cached data ====================
+@st.cache_data
+def cached_actuals():
+    return load_actuals()
 
 
 @st.cache_data
-def load_predictions(csv_path: str) -> pd.DataFrame:
-    df = pd.read_csv(csv_path, parse_dates=["settlementdate"])
-    return df
+def cached_forecasts():
+    return load_forecasts()
 
 
-def compute_kpis(df: pd.DataFrame, spike_threshold: float) -> dict:
-    normal_mask = df["rrp_actual"] < spike_threshold
-    spike_mask = df["rrp_actual"] >= spike_threshold
-
-    kpis = {
-        "normal_mae": mean_absolute_error(df.loc[normal_mask, "rrp_actual"], df.loc[normal_mask, "rrp_base_prediction"]) if normal_mask.sum() > 0 else np.nan,
-        "normal_r2": r2_score(df.loc[normal_mask, "rrp_actual"], df.loc[normal_mask, "rrp_base_prediction"]) if normal_mask.sum() > 0 else np.nan,
-        "spike_mae_base": mean_absolute_error(df.loc[spike_mask, "rrp_actual"], df.loc[spike_mask, "rrp_base_prediction"]) if spike_mask.sum() > 0 else np.nan,
-        "spike_mae_q90": mean_absolute_error(df.loc[spike_mask, "rrp_actual"], df.loc[spike_mask, "rrp_risk_ceiling"]) if spike_mask.sum() > 0 else np.nan,
-        "coverage": (df["rrp_actual"] <= df["rrp_risk_ceiling"]).mean(),
-        "n_normal": int(normal_mask.sum()),
-        "n_spike": int(spike_mask.sum()),
-    }
-    return kpis
+@st.cache_data
+def cached_backtest():
+    return load_backtest()
 
 
-def simulate_hedging_strategy(df: pd.DataFrame, risk_threshold: float, hedge_ratio: float) -> pd.DataFrame:
-    df = df.copy()
-    INTERVAL_HOURS = 5 / 60  # 5分足なので、MW→MWh変換のため時間換算
-
-    df["cost_naive"] = df["rrp_actual"] * df["totaldemand"] * INTERVAL_HOURS
-
-    is_high_risk = df["rrp_risk_ceiling"] >= risk_threshold
-    hedged_demand = np.where(is_high_risk, df["totaldemand"] * (1 - hedge_ratio), df["totaldemand"])
-    df["cost_hedged"] = df["rrp_actual"] * hedged_demand * INTERVAL_HOURS
-
-    df["cumulative_cost_naive"] = df["cost_naive"].cumsum()
-    df["cumulative_cost_hedged"] = df["cost_hedged"].cumsum()
-    df["is_high_risk"] = is_high_risk
-
-    return df
+@st.cache_data
+def cached_regime(spike_threshold):
+    return monthly_regime(cached_actuals(), spike_threshold)
 
 
-# ==================== Sidebar (business levers only) ====================
-st.sidebar.header("⚙️ Scenario Settings")
-st.sidebar.caption("Adjust how you prepare for price spike risk using the two settings below.")
+actuals = cached_actuals()
+latest, log = cached_forecasts()
+bt_monthly, bt_preds = cached_backtest()
 
-df_full = load_predictions("data/processed/rrp_dual_prediction_output.csv")
 
-min_date = df_full["settlementdate"].min().date()
-max_date = df_full["settlementdate"].max().date()
-
-date_range = st.sidebar.date_input(
-    "Display period",
-    value=(min_date, max_date),
-    min_value=min_date,
-    max_value=max_date,
-)
-
+# ==================== Sidebar (business levers) ====================
+st.sidebar.header("⚙️ Settings")
 risk_threshold = st.sidebar.slider(
-    "⚠️ Warning line price ($/MWh)",
-    min_value=100, max_value=2000, value=300, step=50,
-    help="If the predicted price ceiling exceeds this value, it is treated as 'at risk'"
+    "⚠️ Warning line price ($/MWh)", min_value=100, max_value=2000, value=300, step=50,
+    help="A period is flagged 'at risk' when the forecast risk ceiling reaches this price",
 )
-
 hedge_ratio = st.sidebar.slider(
-    "Demand reduction rate when avoiding risk",
-    min_value=0.0, max_value=0.5, value=0.1, step=0.05,
-    help="How much electricity usage is assumed to be curtailed during periods predicted to exceed the warning line"
+    "Demand reduction when at risk", min_value=0.0, max_value=0.5, value=0.1, step=0.05,
+    help="Share of electricity use assumed to be curtailed in flagged periods (risk strategy backtest)",
 )
-
-with st.sidebar.expander("🔧 Advanced settings (for experts)"):
+with st.sidebar.expander("🔧 Advanced settings"):
     spike_threshold = st.slider(
-        "Definition of 'price spike' ($/MWh)", min_value=100, max_value=1000, value=300, step=50,
-        help="The threshold value used to separate 'normal' from 'spike' periods when evaluating model accuracy"
+        "Definition of a 'price spike' ($/MWh)", min_value=100, max_value=1000, value=300, step=50,
+        help="Separates 'normal' from 'spike' intervals in accuracy metrics and market-regime counts",
     )
 
-# Period filter
-if isinstance(date_range, tuple) and len(date_range) == 2:
-    start_date, end_date = date_range
-    mask = (df_full["settlementdate"].dt.date >= start_date) & (df_full["settlementdate"].dt.date <= end_date)
-    df = df_full.loc[mask].copy()
-else:
-    df = df_full.copy()
 
-if df.empty:
-    st.warning("There is no data for the selected period. Please adjust the period.")
-    st.stop()
-
-# ==================== Main screen ====================
-st.title("⚡ AEMO NSW1 Electricity Price Risk Management Dashboard")
+# ==================== Header ====================
+issue_date = latest["issue_date"].max()
+cutoff = issue_date  # actuals are complete up to 00:00 of the issue date
+st.title("⚡ AEMO NSW1 Electricity Price Outlook & Risk Dashboard")
 st.caption(
-    "Predicts the likely near-term price movement and the risk of a potential price spike, "
-    "and simulates the effect of a risk avoidance strategy."
+    "Every morning a fresh forecast is issued for today and tomorrow: the most likely price "
+    "(central forecast) and a risk ceiling that actual prices should stay below about 90% of the time. "
+    "Data and models are refreshed daily by GitHub Actions."
 )
-st.caption(f"Display period: {df['settlementdate'].min().date()} - {df['settlementdate'].max().date()}")
+market_today = pd.Timestamp(datetime.now(MARKET_TZ).date())
+if (market_today - issue_date).days > 1:
+    st.warning(f"The latest forecast was issued on {issue_date:%d %b %Y}; today's run may not have completed yet.")
 
-st.markdown("---")
-
-# --- (1) Business value section (most prominent position) ---
-st.header("💰 Effect of the risk avoidance strategy")
-
-df_sim = simulate_hedging_strategy(df, risk_threshold, hedge_ratio)
-
-total_naive = df_sim["cumulative_cost_naive"].iloc[-1]
-total_hedged = df_sim["cumulative_cost_hedged"].iloc[-1]
-savings = total_naive - total_hedged
-savings_pct = savings / total_naive * 100 if total_naive != 0 else 0
-
-sim_col1, sim_col2, sim_col3 = st.columns(3)
-sim_col1.metric("Total cost if nothing is done", f"${total_naive:,.0f}")
-sim_col2.metric("Total cost with the risk avoidance strategy", f"${total_hedged:,.0f}")
-sim_col3.metric("Estimated savings", f"${savings:,.0f}", f"{savings_pct:.2f}%")
-
-st.caption(
-    "* This simulation is a proof of concept based on the simplified assumption that electricity "
-    "usage during periods exceeding the warning line could actually be reduced. It does not account "
-    "for the cost of sourcing the curtailed electricity elsewhere."
+tab_outlook, tab_track, tab_regime, tab_strategy = st.tabs(
+    ["🔮 Outlook", "🎯 Track record", "🌡️ Market regime", "💰 Risk strategy backtest"]
 )
 
-fig_sim = go.Figure()
-fig_sim.add_trace(go.Scatter(
-    x=df_sim["settlementdate"], y=df_sim["cumulative_cost_naive"],
-    name="Cumulative cost if nothing is done", line=dict(color="firebrick"),
-))
-fig_sim.add_trace(go.Scatter(
-    x=df_sim["settlementdate"], y=df_sim["cumulative_cost_hedged"],
-    name="Cumulative cost with risk avoidance strategy", line=dict(color="seagreen"),
-))
-fig_sim.update_layout(height=400, xaxis_title="Date/time", yaxis_title="Cumulative cost ($)")
-st.plotly_chart(fig_sim, use_container_width=True)
 
-with st.expander("🔔 View the periods when risk avoidance was triggered"):
-    hedge_events = df_sim[df_sim["is_high_risk"]][
-        ["settlementdate", "rrp_actual", "rrp_risk_ceiling", "totaldemand"]
-    ].rename(columns={
-        "settlementdate": "Date/time",
-        "rrp_actual": "Actual price ($)",
-        "rrp_risk_ceiling": "Predicted risk ceiling ($)",
-        "totaldemand": "Demand (MW)",
-    })
-    st.dataframe(hedge_events, use_container_width=True)
-    st.caption(f"Number of matching records: {len(hedge_events):,}")
+# ==================== (1) Outlook ====================
+with tab_outlook:
+    st.subheader(f"Forecast issued {issue_date:%a %d %b %Y}")
+    st.caption(f"Uses actual prices up to {cutoff:%d %b %H:%M} (market time) plus a temperature forecast.")
 
-st.markdown("---")
+    at_risk = latest[latest["rrp_risk_ceiling"] >= risk_threshold]
+    peak = latest.loc[latest["rrp_risk_ceiling"].idxmax()]
+    by_lead = latest.groupby("lead")["rrp_base_prediction"].mean()
 
-# --- (2) Price outlook section ---
-st.header("📈 Price outlook")
-st.caption("The black line is the actual price, the blue dotted line is the model's prediction, "
-           "and the red band is the risk ceiling representing a 'worst case' estimate.")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Today: expected average price", f"${by_lead.get('today', np.nan):,.0f}/MWh")
+    c2.metric("Tomorrow: expected average price", f"${by_lead.get('tomorrow', np.nan):,.0f}/MWh")
+    c3.metric("Highest risk ceiling (next 2 days)", f"${peak['rrp_risk_ceiling']:,.0f}/MWh",
+              f"at {peak['settlementdate']:%a %H:%M}", delta_color="off", delta_arrow="off")
+    c4.metric("Time at or above the warning line", f"{len(at_risk) * 5 / 60:.1f} h",
+              f"warning line ${risk_threshold}", delta_color="off", delta_arrow="off")
 
-fig_ts = go.Figure()
-fig_ts.add_trace(go.Scatter(
-    x=df["settlementdate"], y=df["rrp_risk_ceiling"],
-    name="Risk ceiling (assumed maximum)", line=dict(color="rgba(255,99,71,0.5)", width=1),
-))
-fig_ts.add_trace(go.Scatter(
-    x=df["settlementdate"], y=df["rrp_actual"],
-    name="Actual price", line=dict(color="black", width=1.5),
-))
-fig_ts.add_trace(go.Scatter(
-    x=df["settlementdate"], y=df["rrp_base_prediction"],
-    name="Predicted price", line=dict(color="royalblue", width=1.5, dash="dot"),
-))
-fig_ts.add_hline(y=risk_threshold, line_dash="dash", line_color="grey",
+    recent = actuals[actuals["settlementdate"] > cutoff - pd.Timedelta(days=2)]
+    fc = latest.sort_values("settlementdate")
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=recent["settlementdate"], y=recent["rrp"], name="Actual price (last 2 days)",
+                             line=dict(color=C_ACTUAL, width=1.5)))
+    fig.add_trace(go.Scatter(x=fc["settlementdate"], y=fc["rrp_base_prediction"], name="Central forecast",
+                             line=dict(color=C_CENTRAL, width=2)))
+    fig.add_trace(go.Scatter(x=fc["settlementdate"], y=fc["rrp_risk_ceiling"], name="Risk ceiling (90%)",
+                             line=dict(color=C_RISK, width=1.5), fill="tonexty",
+                             fillcolor="rgba(245,133,24,0.15)"))
+    fig.add_hline(y=risk_threshold, line_dash="dash", line_color="grey",
                   annotation_text=f"Warning line (${risk_threshold})")
-fig_ts.update_layout(height=450, xaxis_title="Date/time", yaxis_title="Price ($/MWh)")
-st.plotly_chart(fig_ts, use_container_width=True)
+    fig.add_vline(x=cutoff, line_dash="dot", line_color="grey")
+    fig.add_vrect(x0=cutoff + pd.Timedelta(days=1), x1=cutoff + pd.Timedelta(days=2),
+                  fillcolor="grey", opacity=0.06, line_width=0,
+                  annotation_text="Tomorrow", annotation_position="top left")
+    fig.add_annotation(x=cutoff, y=1, yref="paper", text="Forecast from here", showarrow=False,
+                       xanchor="left", yanchor="bottom")
+    fig.update_layout(height=450, xaxis_title="Date/time (market time)", yaxis_title="Price ($/MWh)",
+                      legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
+    st.plotly_chart(fig, width="stretch")
 
-st.markdown("---")
-
-# --- (3) Technical details (supplementary, collapsible) ---
-with st.expander("📊 About this model's accuracy (technical details for engineers)"):
-    st.markdown(
-        "The following are metrics evaluating the predictive accuracy of the machine learning model. "
-        "They show how accurately the model predicted a period it had never actually seen (the test data)."
-    )
-
-    kpis = compute_kpis(df, spike_threshold)
-
-    tcol1, tcol2, tcol3, tcol4, tcol5 = st.columns(5)
-    tcol1.metric("Normal-period MAE (mean error)", f"{kpis['normal_mae']:.2f}")
-    tcol2.metric("Normal-period R2 (explanatory power)", f"{kpis['normal_r2']:.4f}")
-    tcol3.metric("Spike-period MAE (base prediction)", f"{kpis['spike_mae_base']:.2f}")
-    tcol4.metric("Spike-period MAE (risk ceiling model)", f"{kpis['spike_mae_q90']:.2f}")
-    tcol5.metric("Risk ceiling coverage (target 90%)", f"{kpis['coverage']:.2%}")
+    with st.expander("📉 Demand outlook"):
+        fig_d = go.Figure()
+        fig_d.add_trace(go.Scatter(x=recent["settlementdate"], y=recent["totaldemand"], name="Actual demand",
+                                   line=dict(color=C_ACTUAL, width=1.5)))
+        fig_d.add_trace(go.Scatter(x=fc["settlementdate"], y=fc["demand_forecast"], name="Demand forecast",
+                                   line=dict(color=C_CENTRAL, width=2)))
+        fig_d.add_vline(x=cutoff, line_dash="dot", line_color="grey")
+        fig_d.update_layout(height=320, xaxis_title="Date/time (market time)", yaxis_title="Demand (MW)",
+                            legend=dict(orientation="h", y=-0.3), margin=dict(t=20))
+        st.plotly_chart(fig_d, width="stretch")
 
     st.caption(
-        f"Normal periods: {kpis['n_normal']:,} | Spike periods: {kpis['n_spike']:,} "
-        f"(spike defined as price exceeding ${spike_threshold})"
+        "Today's forecast looks 6-24 hours ahead and tomorrow's 24-48 hours ahead, so tomorrow is less certain. "
+        "The central forecast targets typical conditions; it does not try to predict the size of price spikes. "
+        "That is the risk ceiling's job."
     )
 
-    st.markdown(
-        "- **Base prediction model**: LightGBM regression. Tuned to accurately capture price movement during normal periods\n"
-        "- **Risk ceiling model**: Quantile regression (90th percentile). Conservatively estimates the 'upside range' during spikes\n"
-        "- Supply-side features (such as the reserve margin ratio) function as the most important predictors in the model"
+
+# ==================== (2) Track record ====================
+with tab_track:
+    st.subheader("How past forecasts turned out")
+    st.caption(
+        "Each forecast is saved before the day it covers, then compared with what actually happened. "
+        "Unlike the backtest, this record cannot be tuned after the fact."
     )
+
+    scored = score_forecast_log(log, actuals)
+    lead = st.radio("Forecast horizon", list(LEAD_DAYS), horizontal=True, key="track_lead",
+                    format_func=lambda x: {"today": "Today (6-24h ahead)", "tomorrow": "Tomorrow (24-48h ahead)"}[x])
+    s = scored[scored["lead"] == lead]
+
+    if s.empty:
+        st.info("No forecast for this horizon has been scored yet: actual prices arrive the day after.")
+    else:
+        rows = []
+        for is_current, g in s.groupby("current_model"):
+            m = price_metrics(g, spike_threshold)
+            rows.append({
+                "Model": "Current" if is_current else f"Earlier (before {CURRENT_MODEL_SINCE:%d %b})",
+                "Days scored": g["settlementdate"].sub(pd.Timedelta(minutes=5)).dt.date.nunique(),
+                "Normal MAE ($/MWh)": m["normal_mae"],
+                "Naive MAE ($/MWh)": m.get("normal_mae_naive"),
+                "Average error ($/MWh)": m["normal_bias"],
+                "Risk ceiling coverage": m["coverage"],
+                "Spikes": m["n_spike"],
+            })
+        st.dataframe(pd.DataFrame(rows).style.format({
+            "Normal MAE ($/MWh)": "{:.1f}", "Naive MAE ($/MWh)": "{:.1f}", "Average error ($/MWh)": "{:+.1f}",
+            "Risk ceiling coverage": "{:.0%}"}), hide_index=True, width="stretch")
+        if not s["current_model"].any():
+            st.info("The current model's first forecasts will appear here once their day's actual prices arrive.")
+        st.caption(
+            "Naive = the price at the same time on the latest day known when the forecast was issued. "
+            f"Forecasts issued before {CURRENT_MODEL_SINCE:%d %b %Y} came from an earlier model that ran "
+            "systematically low (negative average error); it was fixed after the backtest exposed it. "
+            "A few days is too short to judge accuracy; see the backtest for 20 months of results."
+        )
+
+        fig_t = go.Figure()
+        fig_t.add_trace(go.Scatter(x=s["settlementdate"], y=s["rrp_actual"], name="Actual price",
+                                   line=dict(color=C_ACTUAL, width=1.5)))
+        fig_t.add_trace(go.Scatter(x=s["settlementdate"], y=s["rrp_base_prediction"], name="Central forecast",
+                                   line=dict(color=C_CENTRAL, width=2)))
+        fig_t.add_trace(go.Scatter(x=s["settlementdate"], y=s["rrp_risk_ceiling"], name="Risk ceiling (90%)",
+                                   line=dict(color=C_RISK, width=1.5, dash="dot")))
+        if s["current_model"].any() and (~s["current_model"]).any():
+            fig_t.add_vline(x=s.loc[s["current_model"], "settlementdate"].min(), line_dash="dot",
+                            line_color="grey", annotation_text="Current model")
+        fig_t.update_layout(height=420, xaxis_title="Date/time (market time)", yaxis_title="Price ($/MWh)",
+                            legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
+        st.plotly_chart(fig_t, width="stretch")
+
+
+# ==================== (3) Market regime ====================
+with tab_regime:
+    st.subheader("Is the market behaving like the data the models learned from?")
+
+    drift = spike_drift(actuals, spike_threshold)
+    msg = (f"Last {drift['recent_days']} days: **{drift['recent_per_day']:.2f} spikes/day** "
+           f"vs **{drift['baseline_per_day']:.2f}/day** over the {drift['baseline_days']} days before "
+           f"(roughly the models' training window; spike = price ≥ \\${spike_threshold}).")
+    if drift["level"] == "calmer":
+        st.info(f"🟦 **Calmer than the training period.** {msg} "
+                "Models trained on the past year may overstate spike risk, so the risk ceiling is likely "
+                "conservative right now.")
+    elif drift["level"] == "spikier":
+        st.warning(f"🟧 **Spikier than the training period.** {msg} "
+                   "The risk ceiling may understate current risk until the models catch up.")
+    else:
+        st.success(f"🟩 **Similar to the training period.** {msg}")
+
+    regime = cached_regime(spike_threshold)
+    col1, col2 = st.columns(2)
+    fig_s = go.Figure(go.Bar(x=regime.index, y=regime["spikes"], marker_color=C_RISK, name="Spike intervals"))
+    fig_s.update_layout(height=320, title="Spike intervals per month", yaxis_title="Intervals",
+                        margin=dict(t=40))
+    col1.plotly_chart(fig_s, width="stretch")
+    fig_n = go.Figure(go.Bar(x=regime.index, y=regime["negative_share"] * 100, marker_color=C_CENTRAL,
+                             name="Negative-price share"))
+    fig_n.update_layout(height=320, title="Share of intervals with negative prices", yaxis_title="%",
+                        margin=dict(t=40))
+    col2.plotly_chart(fig_n, width="stretch")
+
+    fig_c = go.Figure()
+    for lead_name, color in [("today", C_CENTRAL), ("tomorrow", C_RISK)]:
+        m = bt_monthly[bt_monthly["lead"] == lead_name]
+        fig_c.add_trace(go.Scatter(x=pd.to_datetime(m["month"]), y=m["q90_coverage"] * 100, mode="lines+markers",
+                                   name=f"{lead_name.capitalize()} forecast", line=dict(color=color)))
+    fig_c.add_hline(y=90, line_dash="dash", line_color="grey", annotation_text="Target 90%")
+    fig_c.update_layout(height=320, title="Risk ceiling coverage by month (walk-forward backtest)",
+                        yaxis_title="% of intervals below the ceiling", legend=dict(orientation="h", y=-0.25),
+                        margin=dict(t=40))
+    st.plotly_chart(fig_c, width="stretch")
+    st.caption("Coverage swings month to month even when the long-run average is close to 90%, "
+               "which is why it is tracked over time rather than as a single number.")
+
+    st.markdown("#### Compare two periods")
+    last_day = (actuals["settlementdate"].max() - pd.Timedelta(minutes=5)).date()
+    first_day = (actuals["settlementdate"].min()).date()
+    default_b = (last_day - timedelta(days=89), last_day)
+    default_a = (default_b[0] - timedelta(days=365), default_b[1] - timedelta(days=365))
+    pc1, pc2 = st.columns(2)
+    period_a = pc1.date_input("Period A", value=default_a, min_value=first_day, max_value=last_day, key="period_a")
+    period_b = pc2.date_input("Period B", value=default_b, min_value=first_day, max_value=last_day, key="period_b")
+
+    if not (isinstance(period_a, tuple) and len(period_a) == 2 and isinstance(period_b, tuple) and len(period_b) == 2):
+        st.info("Select a start and end date for both periods.")
+    else:
+        pa = period_profile(actuals, *period_a, spike_threshold)
+        pb = period_profile(actuals, *period_b, spike_threshold)
+        label_a = f"A: {period_a[0]:%d %b %Y} - {period_a[1]:%d %b %Y}"
+        label_b = f"B: {period_b[0]:%d %b %Y} - {period_b[1]:%d %b %Y}"
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Average price (B)", f"${pb['mean_price']:,.0f}", f"{pb['mean_price'] - pa['mean_price']:+,.0f} vs A",
+                  delta_color="inverse")
+        m2.metric("Median price (B)", f"${pb['median_price']:,.0f}", f"{pb['median_price'] - pa['median_price']:+,.0f} vs A",
+                  delta_color="inverse")
+        m3.metric("Spikes per day (B)", f"{pb['spikes_per_day']:.2f}", f"{pb['spikes_per_day'] - pa['spikes_per_day']:+.2f} vs A",
+                  delta_color="inverse")
+        m4.metric("Negative-price share (B)", f"{pb['negative_share']:.1%}",
+                  f"{(pb['negative_share'] - pa['negative_share']) * 100:+.1f} pt vs A", delta_color="off")
+
+        col1, col2 = st.columns(2)
+        fig_h = go.Figure()
+        for p, label, color in [(pa, label_a, C_A), (pb, label_b, C_B)]:
+            fig_h.add_trace(go.Scatter(x=p["hourly_median"].index, y=p["hourly_median"].values, name=label,
+                                       line=dict(color=color, width=2)))
+        fig_h.update_layout(height=360, title="Median price by hour of day", xaxis_title="Hour",
+                            yaxis_title="$/MWh", legend=dict(orientation="h", y=-0.3), margin=dict(t=40))
+        col1.plotly_chart(fig_h, width="stretch")
+
+        fig_dc = go.Figure()
+        for p, label, color in [(pa, label_a, C_A), (pb, label_b, C_B)]:
+            step = max(len(p["duration_price"]) // 2000, 1)  # thin out for plotting
+            fig_dc.add_trace(go.Scatter(x=p["duration_pct"][::step], y=p["duration_price"][::step], name=label,
+                                        line=dict(color=color, width=2)))
+        top = max(np.percentile(pa["duration_price"], 99), np.percentile(pb["duration_price"], 99))
+        fig_dc.update_layout(height=360, title="Price duration curve", xaxis_title="% of time price is at or above",
+                             yaxis_title="$/MWh", yaxis_range=[min(pa["duration_price"].min(), pb["duration_price"].min(), 0) - 20,
+                                                              top * 1.2],
+                             legend=dict(orientation="h", y=-0.3), margin=dict(t=40))
+        col2.plotly_chart(fig_dc, width="stretch")
+        st.caption("The duration curve's top 1% is cut off so the typical range stays readable; "
+                   f"max price was \\${pa['max_price']:,.0f} in A and \\${pb['max_price']:,.0f} in B.")
+
+
+# ==================== (4) Risk strategy backtest ====================
+with tab_strategy:
+    st.subheader("💰 What if you had acted on the risk ceiling?")
+    st.caption(
+        "Walk-forward backtest: for each month, the models were trained only on the 365 days before it, "
+        "then forecast every day of that month. Nothing after the forecast date was used."
+    )
+
+    sc1, sc2 = st.columns([1, 2])
+    bt_lead = sc1.radio("Act on", list(LEAD_DAYS), horizontal=True, key="bt_lead",
+                        format_func=lambda x: {"today": "Today's forecast", "tomorrow": "Tomorrow's forecast"}[x])
+    bt = bt_preds[bt_preds["lead"] == bt_lead]
+    bt_min = (bt["settlementdate"].min() - pd.Timedelta(minutes=5)).date()
+    bt_max = (bt["settlementdate"].max() - pd.Timedelta(minutes=5)).date()
+    bt_range = sc2.date_input("Period", value=(bt_min, bt_max), min_value=bt_min, max_value=bt_max, key="bt_range")
+    if isinstance(bt_range, tuple) and len(bt_range) == 2:
+        d = (bt["settlementdate"] - pd.Timedelta(minutes=5)).dt.date
+        bt = bt[(d >= bt_range[0]) & (d <= bt_range[1])]
+    if bt.empty:
+        st.warning("There is no data for the selected period.")
+        st.stop()
+
+    sim = simulate_hedging_strategy(bt, risk_threshold, hedge_ratio)
+    total_naive, total_hedged = sim["cost_naive"].sum(), sim["cost_hedged"].sum()
+    savings = total_naive - total_hedged
+    q = alert_quality(sim, spike_threshold)
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Wholesale cost if nothing is done", f"${total_naive / 1e6:,.1f}M")
+    k2.metric("Cost with the strategy", f"${total_hedged / 1e6:,.1f}M")
+    k3.metric("Estimated savings", f"${savings / 1e6:,.1f}M",
+              f"{savings / total_naive * 100:.2f}%" if total_naive else None)
+    k4, k5, k6 = st.columns(3)
+    k4.metric("Time flagged at risk", f"{q['alerts'] * 5 / 60:,.0f} h")
+    k5.metric("Spikes flagged in advance", f"{q['spikes_caught']:.0%}" if q["spikes"] else "no spikes",
+              help=f"Share of intervals priced ≥ \\${spike_threshold} that were flagged (recall)")
+    k6.metric("Flags that were real spikes", f"{q['alerts_on_spikes']:.0%}" if q["alerts"] else "no flags",
+              help=f"Share of flagged intervals that actually reached \\${spike_threshold} (precision). "
+                   "Most flags are precautionary: the ceiling is a 90% upper bound, not a spike prediction.")
+
+    sim["month"] = (sim["settlementdate"] - pd.Timedelta(minutes=5)).dt.to_period("M").dt.to_timestamp()
+    monthly_sav = sim.groupby("month").apply(lambda g: (g["cost_naive"] - g["cost_hedged"]).sum() / 1e6,
+                                             include_groups=False)
+    col1, col2 = st.columns(2)
+    fig_sim = go.Figure()
+    fig_sim.add_trace(go.Scatter(x=sim["settlementdate"], y=sim["cumulative_cost_naive"] / 1e6,
+                                 name="If nothing is done", line=dict(color=C_NAIVE)))
+    fig_sim.add_trace(go.Scatter(x=sim["settlementdate"], y=sim["cumulative_cost_hedged"] / 1e6,
+                                 name="With the strategy", line=dict(color=C_HEDGED)))
+    fig_sim.update_layout(height=360, title="Cumulative wholesale cost", yaxis_title="$ million",
+                          legend=dict(orientation="h", y=-0.25), margin=dict(t=40))
+    col1.plotly_chart(fig_sim, width="stretch")
+    fig_ms = go.Figure(go.Bar(x=monthly_sav.index, y=monthly_sav.values, marker_color=C_HEDGED))
+    fig_ms.update_layout(height=360, title="Savings by month", yaxis_title="$ million", margin=dict(t=40))
+    col2.plotly_chart(fig_ms, width="stretch")
+    st.caption(
+        "* Proof of concept. Assumes the flagged share of NSW demand could simply be curtailed, and ignores "
+        "the cost of doing so or of sourcing the power elsewhere. Savings concentrate in spiky months; "
+        "in calm months (see Market regime) there is little to save."
+    )
+
+    with st.expander("🔔 Periods flagged at risk"):
+        events = sim[sim["is_high_risk"]][["settlementdate", "rrp_actual", "rrp_risk_ceiling", "totaldemand"]]
+        st.dataframe(events.rename(columns={
+            "settlementdate": "Date/time", "rrp_actual": "Actual price ($)",
+            "rrp_risk_ceiling": "Risk ceiling forecast ($)", "totaldemand": "Demand (MW)",
+        }).round({"Actual price ($)": 1, "Risk ceiling forecast ($)": 1, "Demand (MW)": 1}),
+            width="stretch", hide_index=True)
+        st.caption(f"{len(events):,} flagged 5-minute intervals")
+
+    with st.expander("📊 Model accuracy (technical details)"):
+        tech = []
+        for lead_name, g in bt_preds.groupby("lead", sort=False):
+            m = price_metrics(g, spike_threshold)
+            mb = bt_monthly[bt_monthly["lead"] == lead_name]
+            tech.append({
+                "Horizon": lead_name, "Normal MAE ($/MWh)": m["normal_mae"],
+                "Naive MAE ($/MWh)": np.average(mb["normal_MAE_naive"], weights=mb["intervals"] - mb["spikes"]),
+                "Average error ($/MWh)": m["normal_bias"], "Spike MAE, risk ceiling": m["spike_mae_q90"],
+                "Risk ceiling coverage": m["coverage"],
+                "Months beating naive": f"{(mb['normal_MAE'] < mb['normal_MAE_naive']).sum()}/{len(mb)}",
+            })
+        st.dataframe(pd.DataFrame(tech).style.format({
+            "Normal MAE ($/MWh)": "{:.2f}", "Naive MAE ($/MWh)": "{:.2f}", "Average error ($/MWh)": "{:+.2f}",
+            "Spike MAE, risk ceiling": "{:,.0f}", "Risk ceiling coverage": "{:.1%}"}),
+            hide_index=True, width="stretch")
+        st.caption(f"Walk-forward, {bt_monthly['month'].min()} to {bt_monthly['month'].max()}, "
+                   f"all intervals (not affected by the period filter above); normal = price below \\${spike_threshold}. "
+                   "Naive MAE uses the backtest's fixed \\$300 spike definition.")
+        st.markdown(
+            "- **Central forecast**: LightGBM, L1 (median) objective on asinh(price / 100); tuned for typical conditions\n"
+            "- **Risk ceiling**: LightGBM quantile regression at the 90th percentile\n"
+            "- **Inputs**: only information available at issue time: prices and demand up to the previous "
+            "midnight, same time on the latest day and a week earlier, calendar, temperature forecast\n"
+            "- Retrained every morning on the latest 365 days; separate models for today and tomorrow"
+        )

@@ -73,6 +73,14 @@ def walk_forward(df: pd.DataFrame, months, leads=LEADS, verbose=True, **train_kw
     return pd.DataFrame(rows), pd.concat(preds, ignore_index=True)
 
 
+def save_predictions(preds: pd.DataFrame, path: str) -> None:
+    """Slim copy for the dashboard (committed to the repo): needed columns only, float32 (~7MB)."""
+    cols = ["lead", "settlementdate", "rrp", "totaldemand", "rrp_base_prediction", "rrp_risk_ceiling"]
+    slim = preds[cols].copy()
+    slim[cols[2:]] = slim[cols[2:]].astype("float32")
+    slim.to_parquet(path, index=False, compression="zstd")
+
+
 if __name__ == "__main__":
     first = pd.Period(sys.argv[1] if len(sys.argv) > 1 else "2025-01", freq="M")
     last = pd.Period(sys.argv[2] if len(sys.argv) > 2 else "2026-08", freq="M")
@@ -81,7 +89,7 @@ if __name__ == "__main__":
 
     os.makedirs(OUT_DIR, exist_ok=True)
     monthly.to_csv(os.path.join(OUT_DIR, "walk_forward_monthly.csv"), index=False, float_format="%.6f")
-    all_preds.to_parquet(os.path.join(OUT_DIR, "walk_forward_predictions.parquet"), index=False)
+    save_predictions(all_preds, os.path.join(OUT_DIR, "walk_forward_predictions.parquet"))
 
     pd.set_option("display.width", 160)
     print("\n===== Pooled over all months =====")
