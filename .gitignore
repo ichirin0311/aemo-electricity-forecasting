@@ -21,6 +21,9 @@ notebooks/
 # --- NEMOSISキャッシュ（巨大・再生成可能なので除外） ---
 data/raw/nemosis_cache/
 
+# --- AEMO PD7DAY archive cache (large, re-downloadable) ---
+data/raw/pd7day/
+
 # --- AEMOの単発検証用CSV（sydney_weather.csv等）は除外。price/demandのCSVは含める ---
 data/raw/sydney_weather.csv
 

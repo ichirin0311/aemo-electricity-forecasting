@@ -186,3 +186,47 @@ def alert_quality(sim: pd.DataFrame, spike_threshold: float) -> dict:
         "spikes_caught": hits / spike.sum() if spike.any() else np.nan,        # recall
         "alerts_on_spikes": hits / alert.sum() if alert.any() else np.nan,     # precision
     }
+
+
+# ---------------------------------------------------------------- AEMO PD7DAY benchmark
+
+def load_aemo_log(forecast_dir: str = FORECAST_DIR) -> pd.DataFrame:
+    """AEMO's PD7DAY price for each issue date's trading day (today lead only), 30-minute."""
+    path = os.path.join(forecast_dir, "aemo_pd7day_log.csv")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["issue_date", "interval_datetime", "aemo_rrp", "run_datetime"])
+    return pd.read_csv(path, parse_dates=["issue_date", "interval_datetime", "run_datetime"])
+
+
+def load_backtest_benchmark(backtest_dir: str = BACKTEST_DIR) -> pd.DataFrame:
+    """Walk-forward 'today' forecasts vs AEMO PD7DAY at 30-minute resolution (experiments/pd7day_benchmark.py)."""
+    return pd.read_parquet(os.path.join(backtest_dir, "pd7day_benchmark_30min.parquet")).rename(
+        columns={"rrp": "rrp_actual"}).astype({"rrp_actual": "float64", "rrp_base_prediction": "float64",
+                                               "rrp_risk_ceiling": "float64", "aemo_rrp": "float64"})
+
+
+def to_30min_vs_aemo(scored_today: pd.DataFrame, aemo_log: pd.DataFrame) -> pd.DataFrame:
+    """Scored 'today' forecasts averaged to AEMO's 30-minute (interval-ending) grid, joined with AEMO's price."""
+    df = scored_today.assign(interval_datetime=scored_today["settlementdate"].dt.ceil("30min"))
+    agg = (df.groupby(["issue_date", "interval_datetime"])[["rrp_actual", "rrp_base_prediction", "rrp_risk_ceiling"]]
+           .mean().reset_index())
+    return agg.merge(aemo_log[["issue_date", "interval_datetime", "aemo_rrp"]],
+                     on=["issue_date", "interval_datetime"], how="inner")
+
+
+def benchmark_metrics(df: pd.DataFrame, spike_threshold: float) -> pd.DataFrame:
+    """Ours vs AEMO on 30-minute intervals: typical error, mean error, bias, spike flags."""
+    y = df["rrp_actual"]
+    normal, spike = y < spike_threshold, y >= spike_threshold
+    rows = {}
+    for name, col in [("Our central forecast", "rrp_base_prediction"), ("AEMO PD7DAY", "aemo_rrp")]:
+        err = (df.loc[normal, col] - y[normal])
+        rows[name] = {"Typical error (median, $/MWh)": err.abs().median(),
+                      "Average error (MAE, $/MWh)": err.abs().mean(),
+                      "Bias ($/MWh)": err.mean()}
+    flags = {"Our central forecast": df["rrp_risk_ceiling"], "AEMO PD7DAY": df["aemo_rrp"]}
+    for name, pred in flags.items():
+        flagged = pred >= spike_threshold
+        rows[name]["Spikes flagged"] = (flagged & spike).sum() / spike.sum() if spike.any() else np.nan
+        rows[name]["Flags that were spikes"] = (flagged & spike).sum() / flagged.sum() if flagged.any() else np.nan
+    return pd.DataFrame(rows).T

@@ -8,6 +8,7 @@ import sys
 
 import pandas as pd
 
+from src.aemo_pd7day import save_benchmark
 from src.day_ahead import run_day_ahead, save_forecast
 
 if __name__ == "__main__":
@@ -31,3 +32,11 @@ if __name__ == "__main__":
     if cutoff is None:
         save_forecast(forecast)
         print("Saved to data/forecasts/latest_forecast.csv and appended to forecast_log.csv")
+
+        # Benchmark: AEMO's own PD7DAY price for today, as published before 06:00.
+        # Optional: a NEMweb hiccup must not block the forecast itself.
+        try:
+            bench = save_benchmark(report["cutoff"])
+            print(f"AEMO PD7DAY benchmark saved: run {bench['run_datetime'].iloc[0]}, {len(bench)} intervals")
+        except Exception as e:  # noqa: BLE001
+            print(f"WARNING: AEMO PD7DAY benchmark not saved: {e}")

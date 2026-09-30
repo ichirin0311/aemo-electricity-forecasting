@@ -11,15 +11,17 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.dashboard_data import (CURRENT_MODEL_SINCE, LEAD_DAYS, alert_quality, load_actuals,  # noqa: E402
-                                load_backtest, load_forecasts, monthly_regime, period_profile,
-                                price_metrics, score_forecast_log, simulate_hedging_strategy, spike_drift)
+from src.dashboard_data import (CURRENT_MODEL_SINCE, LEAD_DAYS, alert_quality, benchmark_metrics,  # noqa: E402
+                                load_actuals, load_aemo_log, load_backtest, load_backtest_benchmark,
+                                load_forecasts, monthly_regime, period_profile, price_metrics,
+                                score_forecast_log, simulate_hedging_strategy, spike_drift, to_30min_vs_aemo)
 
 st.set_page_config(page_title="AEMO NSW1 Price Outlook & Risk Dashboard", layout="wide")
 
 # Colors that read on both light and dark themes
 C_ACTUAL, C_CENTRAL, C_RISK = "#8c8c8c", "#4c78a8", "#f58518"
 C_NAIVE, C_HEDGED, C_A, C_B = "#e45756", "#54a24b", "#9d755d", "#4c78a8"
+C_AEMO = "#b279a2"
 MARKET_TZ = timezone(timedelta(hours=10))  # AEMO market time: fixed UTC+10, no DST
 
 
@@ -40,6 +42,11 @@ def cached_backtest():
 
 
 @st.cache_data
+def cached_aemo():
+    return load_aemo_log(), load_backtest_benchmark()
+
+
+@st.cache_data
 def cached_regime(spike_threshold):
     return monthly_regime(cached_actuals(), spike_threshold)
 
@@ -47,6 +54,20 @@ def cached_regime(spike_threshold):
 actuals = cached_actuals()
 latest, log = cached_forecasts()
 bt_monthly, bt_preds = cached_backtest()
+aemo_log, aemo_bt = cached_aemo()
+
+
+def aemo_trace(rows: pd.DataFrame, **kw) -> go.Scatter:
+    """AEMO's 30-min interval-ending prices drawn as steps over each half hour."""
+    rows = rows.sort_values("interval_datetime")
+    return go.Scatter(x=rows["interval_datetime"] - pd.Timedelta(minutes=30), y=rows["aemo_rrp"],
+                      line=dict(color=C_AEMO, width=1.5, dash="dash", shape="hv"), **kw)
+
+
+AEMO_NOTE = ("AEMO PD7DAY = AEMO's own 7-day pre-dispatch price outlook, taken from the last run published before "
+             "06:00 on the issue day. Shown for today only: generators submit next-day bids around 12:30, so at "
+             "06:00 AEMO's outlook for tomorrow is not yet a real price forecast (it sits at the price cap in "
+             "about 10% of half-hours).")
 
 
 # ==================== Sidebar (business levers) ====================
@@ -112,6 +133,9 @@ with tab_outlook:
     fig.add_trace(go.Scatter(x=fc["settlementdate"], y=fc["rrp_risk_ceiling"], name="Risk ceiling (90%)",
                              line=dict(color=C_RISK, width=1.5), fill="tonexty",
                              fillcolor="rgba(245,133,24,0.15)"))
+    aemo_today = aemo_log[aemo_log["issue_date"] == issue_date]
+    if not aemo_today.empty:
+        fig.add_trace(aemo_trace(aemo_today, name="AEMO PD7DAY (today)"))
     fig.add_hline(y=risk_threshold, line_dash="dash", line_color="grey",
                   annotation_text=f"Warning line (${risk_threshold})")
     fig.add_vline(x=cutoff, line_dash="dot", line_color="grey")
@@ -140,6 +164,8 @@ with tab_outlook:
         "The central forecast targets typical conditions; it does not try to predict the size of price spikes. "
         "That is the risk ceiling's job."
     )
+    if not aemo_today.empty:
+        st.caption(AEMO_NOTE)
 
 
 # ==================== (2) Track record ====================
@@ -189,12 +215,31 @@ with tab_track:
                                    line=dict(color=C_CENTRAL, width=2)))
         fig_t.add_trace(go.Scatter(x=s["settlementdate"], y=s["rrp_risk_ceiling"], name="Risk ceiling (90%)",
                                    line=dict(color=C_RISK, width=1.5, dash="dot")))
+        if lead == "today":
+            aemo_scored = aemo_log[aemo_log["issue_date"].isin(s["issue_date"].unique())]
+            if not aemo_scored.empty:
+                fig_t.add_trace(aemo_trace(aemo_scored, name="AEMO PD7DAY"))
         if s["current_model"].any() and (~s["current_model"]).any():
             fig_t.add_vline(x=s.loc[s["current_model"], "settlementdate"].min(), line_dash="dot",
                             line_color="grey", annotation_text="Current model")
         fig_t.update_layout(height=420, xaxis_title="Date/time (market time)", yaxis_title="Price ($/MWh)",
                             legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
         st.plotly_chart(fig_t, width="stretch")
+
+        st.markdown("##### Compared with AEMO's own outlook")
+        if lead == "today":
+            vs = to_30min_vs_aemo(s, aemo_log)
+            if vs.empty:
+                st.info("No day with both a scored forecast and an AEMO outlook yet.")
+            else:
+                st.dataframe(benchmark_metrics(vs, spike_threshold).style.format({
+                    "Typical error (median, $/MWh)": "{:.1f}", "Average error (MAE, $/MWh)": "{:.1f}",
+                    "Bias ($/MWh)": "{:+.1f}", "Spikes flagged": "{:.0%}", "Flags that were spikes": "{:.0%}"},
+                    na_rep="no spikes"), width="stretch")
+                st.caption(f"{vs['issue_date'].nunique()} day(s), 30-minute averages, normal = below "
+                           f"\\${spike_threshold}. Our spike flags use the risk ceiling. {AEMO_NOTE}")
+        else:
+            st.caption(AEMO_NOTE)
 
 
 # ==================== (3) Market regime ====================
@@ -386,4 +431,16 @@ with tab_strategy:
             "- **Inputs**: only information available at issue time: prices and demand up to the previous "
             "midnight, same time on the latest day and a week earlier, calendar, temperature forecast\n"
             "- Retrained every morning on the latest 365 days; separate models for today and tomorrow"
+        )
+
+        st.markdown("##### Today's forecast vs AEMO PD7DAY (walk-forward, 30-minute)")
+        st.dataframe(benchmark_metrics(aemo_bt, spike_threshold).style.format({
+            "Typical error (median, $/MWh)": "{:.1f}", "Average error (MAE, $/MWh)": "{:.1f}",
+            "Bias ($/MWh)": "{:+.1f}", "Spikes flagged": "{:.0%}", "Flags that were spikes": "{:.0%}"}),
+            width="stretch")
+        st.caption(
+            "AEMO's outlook is closer on typical half-hours and flags more spikes, but occasionally projects very "
+            "high prices that don't happen, which inflates its average error. The two carry different "
+            "information: a plain average of them beats either alone on normal-price error. "
+            f"{AEMO_NOTE}"
         )

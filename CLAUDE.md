@@ -352,11 +352,41 @@ the gap widened. Compared in `experiments/price_target_bias.py`:
 Note this does not contradict the earlier "asinh, not log" decision; it is
 still asinh, just with a scale and a median objective.
 
+### AEMO PD7DAY benchmark (2026-10)
+`src/aemo_pd7day.py`, `experiments/pd7day_benchmark.py`. NEMOSIS does not
+support pre-dispatch tables, so this is a custom loader.
+- **Which AEMO forecast to use**: PREDISPATCH is unusable here. The MMSDM
+  archive keeps only the latest run per interval, and a 06:00 run only
+  reaches 04:00 the next day. PD7DAY runs 3x/day (RUN_DATETIME 07:30 /
+  13:00 / 18:00, published ~17 min earlier = LASTCHANGED) and the MMSDM
+  archive keeps every run. Files up to 2026-07 are cumulative (all runs since
+  2024-04); later files are monthly. The loader walks back until covered.
+- **As-of rule**: the latest run with LASTCHANGED <= issue day 06:00, i.e.
+  the D-1 18:00 run.
+- **Only valid for the "today" lead.** Before the day-ahead bid deadline
+  (~12:30), PD7DAY prices for the following days sit at the market price
+  cap in ~10% of half-hours (07:30 run: 10.4% one day ahead; 13:00 run:
+  1.0%). Using PD7DAY for "tomorrow" would require issuing after ~13:00.
+- **Result (today, 30-min, 20 months)**: AEMO is better on typical intervals
+  (median abs. error $15.6 vs ours $19.4) and flags more spikes (61% vs 52%,
+  both ~17% precision), but occasional high false alarms give it normal MAE
+  $106.7 (bias +$81) vs ours $26.2. A plain average when AEMO < $300 gives
+  $20.8, so the two carry complementary information.
+- Live: `run_day_ahead.py` logs AEMO's today price to
+  `data/forecasts/aemo_pd7day_log.csv` (non-fatal if NEMweb fails); the
+  dashboard shows it on Outlook and Track record.
+
 ## Not Yet Started / Future Candidates (Updated)
 
-- Switch the dashboard (`src/app.py`) to v2: upcoming forecast (central + Q90)
-  plus the live track record from `data/forecasts/forecast_log.csv`
-- Add AEMO PREDISPATCH (forecast demand / available generation / price) as
-  inputs, and as a benchmark to compare against
-- v1 is still the one described in the README metrics; clarify there that its
-  numbers use same-interval actuals
+Done since v2 started: dashboard switched to v2 (`src/app.py` +
+`src/dashboard_data.py`: Outlook, Track record, Market regime, Risk strategy
+backtest), README rewritten (v1 numbers labelled as using same-interval
+actuals), PD7DAY benchmark.
+
+- Step 2: add PD7DAY price as a model input for the "today" lead (the
+  benchmark above suggests ~20% lower normal MAE); optionally STPASA
+  (forecast demand / available capacity, ~220MB/month archive) after that
+- Issue #5: decide how the training window treats older regimes. Spike
+  probability at the same demand level fell sharply in 2026 (9-10 GW: 1.89%
+  in 2025 vs 0.06% in 2026), but >11 GW still spikes ~10% of the time
+- Scenario comparison (issue #4) only if a clear use case appears
