@@ -1,105 +1,191 @@
 # AEMO Electricity Price Forecasting
 
-A machine learning pipeline that predicts NSW electricity prices (RRP) and
-demand using AEMO market data, Bureau of Meteorology-sourced weather data
-(via Open-Meteo), and generation capacity data. Includes an interactive
-Streamlit dashboard that translates model predictions into a business
-risk-hedging scenario.
+A daily forecasting system for NSW electricity prices (RRP) and demand in
+Australia's National Electricity Market (NEM). Every morning it forecasts
+**today and tomorrow**, keeps a record of how past forecasts turned out, and
+flags when the market has stopped behaving like the data the models learned
+from. Runs end-to-end on GitHub Actions and a Streamlit dashboard.
 
-**[Live Dashboard](https://aemo-electricity-forecasting-xhtf7sj4xqjesgknueoqza.streamlit.app/)** 
+**[Live Dashboard](https://aemo-electricity-forecasting-xhtf7sj4xqjesgknueoqza.streamlit.app/)**
 
 ## What this project does
 
-Electricity prices in Australia's National Electricity Market (NEM) can
-swing from ~$50/MWh to over $20,000/MWh within minutes when supply is
-tight. This project builds a forecasting system that:
+NEM prices can swing from ~$50/MWh to over $20,000/MWh within minutes when
+supply is tight, and can fall below zero when renewables flood the market.
+A single "expected price" hides that risk, so every forecast has two parts:
 
-1. Predicts a **central price estimate** for planning purposes
-2. Predicts a **90th-percentile risk ceiling** for worst-case scenario planning
-3. Simulates the cost impact of a simple risk-hedging strategy based on
-   these predictions
+1. **Central forecast**: the most likely price, for planning
+2. **Risk ceiling**: a 90th-percentile upper bound that actual prices should
+   stay below about 90% of the time
 
+Every morning (market time), GitHub Actions downloads the latest AEMO data,
+retrains the models on the most recent 365 days, issues a forecast for today
+(6-24h ahead) and tomorrow (24-48h ahead), and commits it to the repo. The
+dashboard redeploys automatically.
 
-## Current limitations & roadmap
+## Dashboard
 
-This pipeline currently retrains on a fixed 2025 dataset daily via GitHub
-Actions (functioning as an automated regression test to catch API/schema
-changes early). AEMO price/demand CSVs are now downloaded automatically
-(`src/aemo_downloader.py`). A planned v2 will shift to a rolling window and
-true next-day price forecasting.
+| Tab | What it answers |
+|---|---|
+| 🔮 **Outlook** | What will prices look like today and tomorrow, and when is the risk highest? |
+| 🎯 **Track record** | How did the forecasts saved before each day compare with what actually happened? |
+| 🌡️ **Market regime** | Is the market calmer or spikier than the models' training period? Compare any two periods side by side |
+| 💰 **Risk strategy backtest** | What would acting on the risk ceiling have saved, and how many warnings were real spikes? |
 
+## Results
 
-## Pipeline overview
+Walk-forward backtest, January 2025 to August 2026 (20 months). For each
+month, the models were trained only on the 365 days before it, then forecast
+every day of that month. "Normal" means prices below $300/MWh. The naive
+benchmark repeats the price at the same time on the latest day known at issue.
+
+| Horizon | Normal MAE | Naive MAE | Normal R² | Months beating naive | Risk ceiling coverage (target 90%) |
+|---|---|---|---|---|---|
+| Today (6-24h ahead) | **$27.92** | $42.70 | 0.531 | 20 / 20 | 87.8% |
+| Tomorrow (24-48h ahead) | **$30.86** | $51.44 | 0.449 | 20 / 20 | 89.4% |
+
+Demand forecast R²: 0.869 (today), 0.853 (tomorrow).
+
+What the models **cannot** do: predict how large a spike will be one or two
+days out. Spike-period errors (~$1,900/MWh) are close to the naive benchmark.
+That is why the risk ceiling exists as a separate output rather than trying
+to fold spikes into the central forecast.
+
+## Things I found along the way
+
+**1. My first model's headline numbers relied on information a real forecast
+wouldn't have.** The v1 price model (normal R² 0.57) used same-interval
+actual demand, available generation, reserve margin and prices up to 5
+minutes before. Its three most important features were all of this kind.
+Rebuilding it with only what is known when the forecast is issued gave a
+lower but honest baseline, which the results above are based on.
+
+**2. A walk-forward backtest exposed a systematic bias.** The central model
+(L2 loss on an arcsinh-transformed price) under-predicted in **every one of
+20 months**, by about $16/MWh on average. In arcsinh space, negative prices
+sit very far from normal ones, so they drag the fitted mean down. Switching
+to an L1 (median) objective on arcsinh(price / 100) removed the bias
+(-$16.4 to -$0.2) and cut normal MAE by 12%. A single test month had not
+revealed this.
+
+**3. The market changed under the models.** Spikes (≥ $300/MWh) fell from
+40-389 per month in 2025 to 0-15 per month from March 2026, and negative
+prices became rare. Public reporting links this to growing battery storage
+([issue #5](https://github.com/ichirin0311/aemo-electricity-forecasting/issues/5)).
+A model trained on the past year can quietly go stale, so the dashboard
+compares recent spike rates with the training window and tracks risk ceiling
+coverage month by month.
+
+**4. The "blocked" AEMO download was a User-Agent problem.** Automated
+downloads had failed with HTTP 403, which looked like AEMO blocking scripts.
+The actual cause was Cloudflare rejecting Python `urllib`'s default
+User-Agent. With `requests`, the monthly CSVs download fine, including from
+GitHub Actions runners.
+
+## How it works
 
 ```
-AEMO price/demand data ──┐
-Open-Meteo weather data ─┼──> feature engineering ──> LightGBM models ──> Streamlit dashboard
-AEMO capacity data ──────┘
-```
+AEMO monthly price/demand CSVs ──┐
+                                 ├──> features known at issue time ──> LightGBM (per horizon) ──> data/forecasts/
+Open-Meteo temperature ──────────┘    (archive for history,             demand / central / Q90
+                                       forecast API for the future)
 
-- **`main.py`**: runs the full data pipeline (fetch, merge, feature engineering)
-- **`src/pipeline.py`**: `AEMODataPipeline` class — data collection & merging
-- **`src/train.py`**: trains the demand model and the dual price models
-  (central estimate + 90th-percentile risk ceiling)
-- **`src/app.py`**: Streamlit dashboard
-- **`src/visualize.py`**: static HTML report generator
+GitHub Actions (daily): download → retrain → forecast → commit → Streamlit Cloud redeploys
+```
 
 ## Key modeling decisions
 
-- **arcsinh transform** instead of log transform for the price target,
-  to avoid compressing normal-range price variation given the market's
-  price floor (-$1,000/MWh)
-- **Two separate models** (central estimate tuned for normal conditions,
-  quantile regression for tail risk) rather than a single blended model —
-  several blending/routing approaches were tested and underperformed a
-  simple dual-model setup
-- **Supply-side features** (available generation capacity, reserve margin)
-  sourced via [NEMOSIS](https://github.com/UNSW-CEEM/NEMOSIS), which
-  turned out to be the most important predictors for price spikes
+- **Only information available at issue time**: prices and demand up to the
+  previous midnight, the same time on the latest day and a week earlier,
+  calendar features, and a temperature forecast. AEMO's CSV is refreshed at
+  00:00 market time, so a morning forecast always has yesterday complete.
+- **Separate central and risk-ceiling models** rather than one blended
+  prediction. Four blending/routing approaches were tried in v1 (classifier
+  routing, dollar-scale and arcsinh-space blending, self-routing on the
+  ceiling). All underperformed, because the spike classifier's precision was
+  only ~18%.
+- **arcsinh, not log**, for the price target: the -$1,000/MWh price floor
+  forces a large log shift that flattens normal-range variation. The central
+  model uses a scaled arcsinh with a median objective (see finding 2); the
+  risk ceiling is LightGBM quantile regression at α = 0.9.
+- **Rolling 365-day window, retrained daily**, with separate models for each
+  horizon.
+- **AEMO market time is fixed UTC+10** (no daylight saving), so weather data
+  is converted with `Etc/GMT-10`, not `Australia/Sydney`.
 
-## Results (NSW1, trained on 2025 data, tested on December 2025)
+## Project structure
+
+```
+run_day_ahead.py           daily forecast (today + tomorrow); run by GitHub Actions
+run_backtest.py            walk-forward evaluation (monthly retrain)
+src/day_ahead.py           data assembly, features, training, forecasting
+src/aemo_downloader.py     AEMO monthly CSV download with caching and retries
+src/dashboard_data.py      data loading and analysis for the dashboard
+src/app.py                 Streamlit dashboard
+experiments/               feasibility and target-transform experiments
+.github/workflows/         daily pipeline
+data/forecasts/            latest forecast + forecast log (updated daily)
+data/backtest/             walk-forward results
+
+main.py, src/pipeline.py,  v1: fixed-2025 pipeline, still run daily as a
+src/train.py               regression test of the data sources (see below)
+```
+
+## Setup
+
+```bash
+pip install -r requirements.txt
+```
+
+Open the dashboard (uses the forecasts and backtest results in the repo, no downloads):
+
+```bash
+python -m streamlit run src/app.py
+```
+
+Issue a fresh forecast for today and tomorrow (downloads AEMO and Open-Meteo data):
+
+```bash
+python run_day_ahead.py
+```
+
+Backtest as if the forecast had been issued on a past morning (prints only):
+
+```bash
+python run_day_ahead.py 2025-12-01
+```
+
+Re-run the 20-month walk-forward evaluation (about 5 minutes):
+
+```bash
+python run_backtest.py
+```
+
+## v1 (archived results)
+
+The first version trained on January-October 2025 and tested on December
+2025, using supply-side features from AEMO's DISPATCHREGIONSUM table via
+[NEMOSIS](https://github.com/UNSW-CEEM/NEMOSIS). It still runs daily
+(`main.py`) as a check that the data sources work.
 
 | Metric | Value |
 |---|---|
 | Demand forecast R² | 0.9665 |
-| Price forecast R² (normal conditions, <$300/MWh) | 0.5667 |
+| Price forecast R² (normal conditions, < $300/MWh) | 0.5667 |
 | Price forecast MAE (normal conditions) | $19.22 |
-| Risk ceiling model MAE (spike conditions) | $1,790.42 |
+| Risk ceiling MAE (spike conditions) | $1,790.42 |
 
-## Setup
-
-### Option 1: Just try the dashboard (no data setup required)
-
-The dashboard reads pre-computed predictions already included in this repo
-(`data/processed/rrp_dual_prediction_output.csv`).
-
-​```bash
-pip install -r requirements.txt
-python -m streamlit run src/app.py
-​```
-
-### Option 2: Run the full pipeline (fetch fresh data, retrain models)
-
-AEMO Price and Demand CSVs are downloaded automatically into
-`data/raw/aemo_data_1year/` from [AEMO](https://www.aemo.com.au)'s monthly
-aggregated price and demand data (already-downloaded closed months are
-reused). First-time NEMOSIS capacity data collection may take significant
-time.
-
-​```bash
-pip install -r requirements.txt
-python main.py
-python -m streamlit run src/app.py
-​```
+These numbers use same-interval actuals as inputs (see finding 1), so they
+are not comparable with the v2 forecast results above.
 
 ## Data sources
 
-- [AEMO Price and Demand data](https://aemo.com.au)
-- [Open-Meteo Historical Weather API](https://open-meteo.com)
-- [NEMOSIS](https://github.com/UNSW-CEEM/NEMOSIS) for AEMO MMSDM tables (generation capacity)
+- [AEMO aggregated price and demand data](https://www.aemo.com.au) (5-minute, NSW1)
+- [Open-Meteo](https://open-meteo.com): Historical Weather API and Forecast API
+- [NEMOSIS](https://github.com/UNSW-CEEM/NEMOSIS) for AEMO MMSDM tables (v1 only)
 
 ## Disclaimer
 
-The hedging cost simulation in the dashboard is a simplified
-proof-of-concept. It assumes avoided demand has no replacement cost and
-does not constitute financial or trading advice.
+The risk strategy backtest is a simplified proof of concept. It assumes
+flagged demand could be curtailed at no cost and does not constitute
+financial or trading advice.
