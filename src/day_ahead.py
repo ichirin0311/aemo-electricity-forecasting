@@ -9,6 +9,10 @@ using only information available at issue time: AEMO actuals up to D 00:00
 temperature forecast. Same-interval demand/capacity actuals used by the v1
 models (src/train.py) are deliberately NOT used, since they are unknown in
 advance. See experiments/day_ahead_baseline.py for the feasibility numbers.
+
+The "today" price models also use AEMO's own PD7DAY price outlook as published
+before 06:00 (src/aemo_pd7day.py; data/forecasts/aemo_pd7day_log.csv). It is not
+used for "tomorrow": at 06:00 that outlook predates the day-ahead bid deadline.
 """
 import os
 from datetime import datetime
@@ -22,9 +26,13 @@ import requests
 from sklearn.metrics import mean_absolute_error, r2_score
 
 from src.aemo_downloader import AEMO_TZ, download_price_and_demand
+from src.aemo_pd7day import save_benchmark
 
 SPIKE = 300
 INTERVALS_PER_DAY = 288
+# Recorded with every live forecast so the track record can be split by model.
+# v2.0 L2 on asinh(rrp) (ran low) -> v2.1 L1 on asinh(rrp/100) -> v2.2 + AEMO PD7DAY input (today lead)
+MODEL_VERSION = "v2.2"
 LEADS = {"today": 1, "tomorrow": 2}
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
@@ -39,9 +47,12 @@ RRP_FEATURES = DEMAND_FEATURES + [
     "rrp_same_time_latest", "rrp_same_time_7d", "rrp_day_mean", "rrp_day_max", "rrp_day_std",
     "rrp_day_spike_share", "rrp_day_mean_7d", "rrp_day_max_7d",
 ]
+# AEMO PD7DAY outlook for the target day ("today" lead only); may be missing (NaN)
+AEMO_FEATURES = ["aemo_rrp", "aemo_day_mean", "aemo_day_max", "aemo_day_share_300"]
+AEMO_LOG = os.path.join("data", "forecasts", "aemo_pd7day_log.csv")
 # Price-valued inputs are fed in asinh space, like the target
 RRP_ASINH_COLS = ["rrp_same_time_latest", "rrp_same_time_7d", "rrp_day_mean", "rrp_day_max",
-                  "rrp_day_mean_7d", "rrp_day_max_7d"]
+                  "rrp_day_mean_7d", "rrp_day_max_7d", "aemo_rrp", "aemo_day_mean", "aemo_day_max"]
 
 # Same hyperparameters as the v1 models in src/train.py
 PARAMS_DEMAND = {"objective": "regression", "metric": "rmse", "learning_rate": 0.05,
@@ -139,12 +150,25 @@ def add_calendar(df: pd.DataFrame, region: str) -> pd.DataFrame:
     return df
 
 
-def build_features(df: pd.DataFrame, lead_days: int) -> pd.DataFrame:
+def load_aemo_asof(path: str = AEMO_LOG) -> pd.DataFrame | None:
+    """AEMO's as-of-06:00 PD7DAY price per issue (= trading) day, 30-minute interval-ending."""
+    if not os.path.exists(path):
+        return None
+    return pd.read_csv(path, parse_dates=["issue_date", "interval_datetime"])[
+        ["issue_date", "interval_datetime", "aemo_rrp"]]
+
+
+def price_feature_cols(lead_days: int, use_aemo: bool) -> list[str]:
+    return RRP_FEATURES + (AEMO_FEATURES if use_aemo and lead_days == 1 else [])
+
+
+def build_features(df: pd.DataFrame, lead_days: int, aemo: pd.DataFrame | None = None) -> pd.DataFrame:
     """
     df: settlementdate, rrp, totaldemand, temperature + calendar columns. Future
     rows (to be forecast) have NaN rrp/totaldemand. For a row in trading day T,
     every feature only uses actuals up to the end of day T - lead_days, so the
     same features can be computed for training rows and for forecast rows.
+    aemo (lead 1 only): AEMO's outlook for day T as published before T 06:00.
     """
     df = df.set_index("settlementdate").copy()
 
@@ -174,13 +198,24 @@ def build_features(df: pd.DataFrame, lead_days: int) -> pd.DataFrame:
     # Target-day temperature range (a forecast at issue time)
     df["temp_day_max"] = df.groupby("trading_day")["temperature"].transform("max")
     df["temp_day_min"] = df.groupby("trading_day")["temperature"].transform("min")
+
+    if aemo is not None and lead_days == 1:
+        a = aemo.rename(columns={"issue_date": "trading_day", "interval_datetime": "aemo_interval"})
+        df["aemo_interval"] = df.index.ceil("30min")  # 5-min interval -> its 30-min interval end
+        df = (df.reset_index()
+              .merge(a[["trading_day", "aemo_interval", "aemo_rrp"]], on=["trading_day", "aemo_interval"], how="left")
+              .set_index("settlementdate"))
+        day = a.groupby("trading_day")["aemo_rrp"].agg(
+            aemo_day_mean="mean", aemo_day_max="max", aemo_day_share_300=lambda s: (s >= SPIKE).mean())
+        df = df.join(day, on="trading_day").drop(columns="aemo_interval")
     return df.reset_index()
 
 
-def price_inputs(df: pd.DataFrame) -> pd.DataFrame:
-    x = df[RRP_FEATURES].copy()
+def price_inputs(df: pd.DataFrame, cols: list[str] = RRP_FEATURES) -> pd.DataFrame:
+    x = df[cols].copy()
     for c in RRP_ASINH_COLS:
-        x[c] = np.arcsinh(x[c])
+        if c in x:
+            x[c] = np.arcsinh(x[c])
     return x
 
 
@@ -195,14 +230,17 @@ def _fit(params, X_tr, y_tr, X_va, y_va):
 def train_lead_models(df_feat: pd.DataFrame, cutoff: pd.Timestamp,
                       train_days: int = 365, val_days: int = 28,
                       base_scale: float = BASE_SCALE, q90_scale: float = Q90_SCALE,
-                      base_params: dict | None = None) -> tuple[dict, dict]:
+                      base_params: dict | None = None,
+                      price_features: list[str] | None = None) -> tuple[dict, dict]:
     """
     Train demand / central price / Q90 models on the train_days before the cutoff;
     the last val_days are held out for early stopping and reported as metrics.
     Price targets are modelled as asinh(rrp / scale), with separate scales for the
-    central and Q90 models.
+    central and Q90 models. price_features may include AEMO_FEATURES, which are
+    allowed to be missing (LightGBM handles NaN).
     """
     base_params = base_params or PARAMS_BASE
+    cols = price_features or RRP_FEATURES
     hist = df_feat[(df_feat["settlementdate"] <= cutoff)
                    & (df_feat["settlementdate"] > cutoff - pd.Timedelta(days=train_days))]
     hist = hist.dropna(subset=RRP_FEATURES + ["rrp", "totaldemand"])
@@ -212,11 +250,11 @@ def train_lead_models(df_feat: pd.DataFrame, cutoff: pd.Timestamp,
     models = {
         "demand": _fit(PARAMS_DEMAND, tr[DEMAND_FEATURES], tr["totaldemand"],
                        va[DEMAND_FEATURES], va["totaldemand"]),
-        "base": _fit(base_params, price_inputs(tr), np.arcsinh(tr["rrp"] / base_scale),
-                     price_inputs(va), np.arcsinh(va["rrp"] / base_scale)),
-        "q90": _fit(PARAMS_Q90, price_inputs(tr), np.arcsinh(tr["rrp"] / q90_scale),
-                    price_inputs(va), np.arcsinh(va["rrp"] / q90_scale)),
-        "base_scale": base_scale, "q90_scale": q90_scale,
+        "base": _fit(base_params, price_inputs(tr, cols), np.arcsinh(tr["rrp"] / base_scale),
+                     price_inputs(va, cols), np.arcsinh(va["rrp"] / base_scale)),
+        "q90": _fit(PARAMS_Q90, price_inputs(tr, cols), np.arcsinh(tr["rrp"] / q90_scale),
+                    price_inputs(va, cols), np.arcsinh(va["rrp"] / q90_scale)),
+        "base_scale": base_scale, "q90_scale": q90_scale, "price_features": cols,
     }
 
     # Validation metrics (last val_days) for monitoring
@@ -239,10 +277,11 @@ def predict_lead(models: dict, rows: pd.DataFrame) -> pd.DataFrame:
     out = rows[["settlementdate"]].copy()
     out["demand_forecast"] = models["demand"].predict(
         rows[DEMAND_FEATURES], num_iteration=models["demand"].best_iteration)
+    x = price_inputs(rows, models["price_features"])
     out["rrp_base_prediction"] = models["base_scale"] * np.sinh(models["base"].predict(
-        price_inputs(rows), num_iteration=models["base"].best_iteration))
+        x, num_iteration=models["base"].best_iteration))
     out["rrp_risk_ceiling"] = models["q90_scale"] * np.sinh(models["q90"].predict(
-        price_inputs(rows), num_iteration=models["q90"].best_iteration))
+        x, num_iteration=models["q90"].best_iteration))
     return out
 
 
@@ -266,15 +305,18 @@ def latest_cutoff(actuals: pd.DataFrame) -> pd.Timestamp:
 
 
 def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
-                  cutoff: pd.Timestamp | None = None, train_days: int = 365) -> tuple[pd.DataFrame, dict]:
+                  cutoff: pd.Timestamp | None = None, train_days: int = 365,
+                  use_aemo: bool = True) -> tuple[pd.DataFrame, dict]:
     """
     Issue the "today" + "tomorrow" forecast. cutoff = D 00:00 (market time): actuals
     up to and including the cutoff are used. None -> the latest complete day
-    available from AEMO (normally today's 00:00). Pass a past cutoff to backtest.
+    available from AEMO (normally today's 00:00), and today's AEMO PD7DAY outlook is
+    fetched and logged first. Pass a past cutoff to backtest.
     """
     region_id = f"{region.upper()}1"
     now = pd.Timestamp(datetime.now(AEMO_TZ).replace(tzinfo=None))
     history_days = train_days + 7 + max(LEADS.values()) + 1  # window + 7d lag + lead lag
+    live = cutoff is None
     requested = cutoff if cutoff is not None else now.normalize()
 
     actuals = load_aemo_actuals(region_id, requested - pd.Timedelta(days=history_days), requested)
@@ -289,9 +331,23 @@ def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
 
     issue_day = cutoff.normalize()
     forecasts, report = [], {"cutoff": cutoff}
+
+    aemo = None
+    if use_aemo:
+        if live:
+            # Optional input: a NEMweb hiccup must not block the forecast (the features are then NaN)
+            try:
+                bench = save_benchmark(issue_day)
+                report["aemo_run"] = bench["run_datetime"].iloc[0]
+            except Exception as e:  # noqa: BLE001
+                print(f"WARNING: AEMO PD7DAY outlook not available: {e}")
+        aemo = load_aemo_asof()
+        report["aemo_today"] = aemo is not None and bool((aemo["issue_date"] == issue_day).any())
+
     for lead_name, lead_days in LEADS.items():
-        feat = build_features(df, lead_days)
-        models, metrics = train_lead_models(feat, cutoff, train_days=train_days)
+        feat = build_features(df, lead_days, aemo)
+        models, metrics = train_lead_models(feat, cutoff, train_days=train_days,
+                                            price_features=price_feature_cols(lead_days, aemo is not None))
         report[lead_name] = metrics
 
         day_start = issue_day + pd.Timedelta(days=lead_days - 1)
@@ -307,6 +363,7 @@ def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
 
     forecast = pd.concat(forecasts, ignore_index=True)
     forecast.insert(0, "issue_date", issue_day.date())
+    forecast["model_version"] = MODEL_VERSION if (report.get("aemo_today") or not use_aemo) else "v2.2-noaemo"
     return forecast, report
 
 

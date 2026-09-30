@@ -14,8 +14,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from src.day_ahead import (LEADS, SPIKE, assemble_frame, build_features, load_aemo_actuals,
-                           predict_lead, train_lead_models)
+from src.day_ahead import (LEADS, RRP_FEATURES, SPIKE, assemble_frame, build_features, load_aemo_actuals,
+                           load_aemo_asof, predict_lead, price_feature_cols, train_lead_models)
 
 REGION, LAT, LON = "NSW", -33.86, 151.20
 TRAIN_DAYS = 365
@@ -48,16 +48,21 @@ def load_backtest_frame(first: pd.Period, last: pd.Period) -> pd.DataFrame:
     return assemble_frame(actuals, REGION, cutoff=end, horizon_end=end, lat=LAT, lon=LON)
 
 
-def walk_forward(df: pd.DataFrame, months, leads=LEADS, verbose=True, **train_kwargs):
-    """Monthly-retrained walk-forward. Returns (monthly metrics, all predictions)."""
+def walk_forward(df: pd.DataFrame, months, leads=LEADS, verbose=True, aemo=None, **train_kwargs):
+    """
+    Monthly-retrained walk-forward. Returns (monthly metrics, all predictions).
+    aemo: AEMO PD7DAY as-of log (load_aemo_asof()) to use as a "today" price input, or None.
+    """
     preds, rows = [], []
     for lead_name, lead_days in leads.items():
-        feat = build_features(df, lead_days)
+        feat = build_features(df, lead_days, aemo)
+        train_kwargs["price_features"] = price_feature_cols(lead_days, aemo is not None)
         for month in months:
             cutoff = month.start_time
             models, _ = train_lead_models(feat, cutoff, train_days=TRAIN_DAYS, **train_kwargs)
             target = feat[(feat["settlementdate"] > cutoff)
-                          & (feat["settlementdate"] <= (month + 1).start_time)].dropna()
+                          & (feat["settlementdate"] <= (month + 1).start_time)]
+            target = target.dropna(subset=RRP_FEATURES + ["rrp", "totaldemand"])
             p = predict_lead(models, target)
             p["rrp"], p["totaldemand"] = target["rrp"].values, target["totaldemand"].values
             p["naive_rrp"] = target["rrp_same_time_latest"].values
@@ -85,7 +90,7 @@ if __name__ == "__main__":
     first = pd.Period(sys.argv[1] if len(sys.argv) > 1 else "2025-01", freq="M")
     last = pd.Period(sys.argv[2] if len(sys.argv) > 2 else "2026-08", freq="M")
     df = load_backtest_frame(first, last)
-    monthly, all_preds = walk_forward(df, pd.period_range(first, last, freq="M"))
+    monthly, all_preds = walk_forward(df, pd.period_range(first, last, freq="M"), aemo=load_aemo_asof())
 
     os.makedirs(OUT_DIR, exist_ok=True)
     monthly.to_csv(os.path.join(OUT_DIR, "walk_forward_monthly.csv"), index=False, float_format="%.6f")

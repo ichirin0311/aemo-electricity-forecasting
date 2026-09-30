@@ -144,3 +144,36 @@ def save_benchmark(issue_day: pd.Timestamp, region_id: str = "NSW1",
     os.makedirs(out_dir, exist_ok=True)
     log.sort_values(["issue_date", "interval_datetime"]).to_csv(path, index=False, float_format="%.4f")
     return bench
+
+
+def backfill_asof_log(first_day: pd.Timestamp, last_day: pd.Timestamp, region_id: str = "NSW1",
+                      out_dir: str = os.path.join("data", "forecasts")) -> pd.DataFrame:
+    """
+    Fill aemo_pd7day_log.csv with the as-of-06:00 'today' price for every issue day in
+    [first_day, last_day], so it can serve as model training data. Days covered by the MMSDM
+    archive come from there; later days from NEMweb's Current folder (~60 days kept).
+    Existing issue dates in the log are kept as they are.
+    """
+    path = os.path.join(out_dir, "aemo_pd7day_log.csv")
+    prev = pd.read_csv(path, parse_dates=["interval_datetime", "run_datetime"]) if os.path.exists(path) else None
+    have = set(pd.to_datetime(prev["issue_date"]).dt.normalize()) if prev is not None else set()
+    days = [d for d in pd.date_range(first_day, last_day, freq="D") if d not in have]
+    if not days:
+        return prev
+
+    archive = load_pd7day_history(days[0], days[-1] + pd.Timedelta(hours=ISSUE_HOUR), region_id)
+    archive_end = archive["published"].max() if not archive.empty else pd.Timestamp.min
+    parts = []
+    for d in days:
+        issue_time = d + pd.Timedelta(hours=ISSUE_HOUR)
+        source = archive if issue_time <= archive_end + pd.Timedelta(days=1) else load_pd7day_latest(issue_time, region_id)
+        rows = as_of_issue(source, d, lead_days=1)
+        if len(rows):
+            parts.append(rows.assign(issue_date=d.date()))
+    new = pd.concat(parts, ignore_index=True)[["issue_date", "interval_datetime", "aemo_rrp", "run_datetime"]]
+    if prev is not None:
+        prev["issue_date"] = pd.to_datetime(prev["issue_date"]).dt.date
+        new = pd.concat([prev, new], ignore_index=True)
+    new = new.sort_values(["issue_date", "interval_datetime"])
+    new.to_csv(path, index=False, float_format="%.4f")
+    return new

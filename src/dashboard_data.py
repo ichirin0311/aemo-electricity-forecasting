@@ -18,9 +18,14 @@ BACKTEST_DIR = os.path.join("data", "backtest")
 LEAD_DAYS = {"today": 1, "tomorrow": 2}
 INTERVAL_HOURS = 5 / 60  # 5-minute interval: MW -> MWh
 
-# First issue date produced by the current central model (L1 on asinh(rrp/100)).
-# Earlier live forecasts came from the L2 setup that under-predicted (see CLAUDE.md, v2).
-CURRENT_MODEL_SINCE = pd.Timestamp("2026-09-30")
+# Live forecasts carry a model_version column from v2.2 on; earlier rows are labelled by
+# issue date (v2.0 until 2026-09-29, v2.1 from 2026-09-30). See CLAUDE.md, v2.
+MODEL_LABELS = {
+    "v2.0": "v2.0 - earlier model (ran systematically low)",
+    "v2.1": "v2.1 - bias fix (median objective)",
+    "v2.2": "v2.2 - + AEMO outlook (today)",
+    "v2.2-noaemo": "v2.2 - AEMO outlook unavailable that day",
+}
 
 
 # ---------------------------------------------------------------- loading
@@ -62,7 +67,10 @@ def score_forecast_log(log: pd.DataFrame, actuals: pd.DataFrame) -> pd.DataFrame
                        on="settlementdate", how="inner")
     lag = scored["lead"].map(LEAD_DAYS).map(lambda d: pd.Timedelta(days=d))
     scored["naive_rrp"] = (scored["settlementdate"] - lag).map(a["rrp"])
-    scored["current_model"] = scored["issue_date"] >= CURRENT_MODEL_SINCE
+    if "model_version" not in scored:
+        scored["model_version"] = np.nan
+    legacy = np.where(scored["issue_date"] < pd.Timestamp("2026-09-30"), "v2.0", "v2.1")
+    scored["model_version"] = scored["model_version"].fillna(pd.Series(legacy, index=scored.index))
     return scored
 
 

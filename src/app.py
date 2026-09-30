@@ -11,7 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from src.dashboard_data import (CURRENT_MODEL_SINCE, LEAD_DAYS, alert_quality, benchmark_metrics,  # noqa: E402
+from src.dashboard_data import (MODEL_LABELS, LEAD_DAYS, alert_quality, benchmark_metrics,  # noqa: E402
                                 load_actuals, load_aemo_log, load_backtest, load_backtest_benchmark,
                                 load_forecasts, monthly_regime, period_profile, price_metrics,
                                 score_forecast_log, simulate_hedging_strategy, spike_drift, to_30min_vs_aemo)
@@ -185,10 +185,10 @@ with tab_track:
         st.info("No forecast for this horizon has been scored yet: actual prices arrive the day after.")
     else:
         rows = []
-        for is_current, g in s.groupby("current_model"):
+        for version, g in s.groupby("model_version"):
             m = price_metrics(g, spike_threshold)
             rows.append({
-                "Model": "Current" if is_current else f"Earlier (before {CURRENT_MODEL_SINCE:%d %b})",
+                "Model": MODEL_LABELS.get(version, version),
                 "Days scored": g["settlementdate"].sub(pd.Timedelta(minutes=5)).dt.date.nunique(),
                 "Normal MAE ($/MWh)": m["normal_mae"],
                 "Naive MAE ($/MWh)": m.get("normal_mae_naive"),
@@ -199,13 +199,15 @@ with tab_track:
         st.dataframe(pd.DataFrame(rows).style.format({
             "Normal MAE ($/MWh)": "{:.1f}", "Naive MAE ($/MWh)": "{:.1f}", "Average error ($/MWh)": "{:+.1f}",
             "Risk ceiling coverage": "{:.0%}"}), hide_index=True, width="stretch")
-        if not s["current_model"].any():
-            st.info("The current model's first forecasts will appear here once their day's actual prices arrive.")
+        latest_version = log["model_version"].dropna().max() if "model_version" in log else None
+        if latest_version and latest_version not in set(s["model_version"]):
+            st.info(f"The current model ({MODEL_LABELS.get(latest_version, latest_version)}) will appear here "
+                    "once its first forecast day's actual prices arrive.")
         st.caption(
             "Naive = the price at the same time on the latest day known when the forecast was issued. "
-            f"Forecasts issued before {CURRENT_MODEL_SINCE:%d %b %Y} came from an earlier model that ran "
-            "systematically low (negative average error); it was fixed after the backtest exposed it. "
-            "A few days is too short to judge accuracy; see the backtest for 20 months of results."
+            "Each row is one model version; the v2.0 model ran systematically low (negative average error) and "
+            "was fixed after the backtest exposed it. A few days is too short to judge accuracy; see the "
+            "backtest for 20 months of results."
         )
 
         fig_t = go.Figure()
@@ -219,9 +221,9 @@ with tab_track:
             aemo_scored = aemo_log[aemo_log["issue_date"].isin(s["issue_date"].unique())]
             if not aemo_scored.empty:
                 fig_t.add_trace(aemo_trace(aemo_scored, name="AEMO PD7DAY"))
-        if s["current_model"].any() and (~s["current_model"]).any():
-            fig_t.add_vline(x=s.loc[s["current_model"], "settlementdate"].min(), line_dash="dot",
-                            line_color="grey", annotation_text="Current model")
+        starts = s.groupby("model_version")["settlementdate"].min().sort_values()
+        for version, start in starts.iloc[1:].items():
+            fig_t.add_vline(x=start, line_dash="dot", line_color="grey", annotation_text=version)
         fig_t.update_layout(height=420, xaxis_title="Date/time (market time)", yaxis_title="Price ($/MWh)",
                             legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
         st.plotly_chart(fig_t, width="stretch")
@@ -429,7 +431,8 @@ with tab_strategy:
             "- **Central forecast**: LightGBM, L1 (median) objective on asinh(price / 100); tuned for typical conditions\n"
             "- **Risk ceiling**: LightGBM quantile regression at the 90th percentile\n"
             "- **Inputs**: only information available at issue time: prices and demand up to the previous "
-            "midnight, same time on the latest day and a week earlier, calendar, temperature forecast\n"
+            "midnight, same time on the latest day and a week earlier, calendar, temperature forecast; "
+            "today's price models also use AEMO's PD7DAY outlook published before 06:00\n"
             "- Retrained every morning on the latest 365 days; separate models for today and tomorrow"
         )
 

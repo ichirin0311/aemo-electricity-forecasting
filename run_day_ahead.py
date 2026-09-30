@@ -8,7 +8,6 @@ import sys
 
 import pandas as pd
 
-from src.aemo_pd7day import save_benchmark
 from src.day_ahead import run_day_ahead, save_forecast
 
 if __name__ == "__main__":
@@ -16,6 +15,9 @@ if __name__ == "__main__":
     forecast, report = run_day_ahead(region="NSW", lat=-33.86, lon=151.20, cutoff=cutoff)
 
     print(f"\nCutoff (actuals up to): {report['cutoff']}")
+    if "aemo_run" in report:
+        print(f"AEMO PD7DAY outlook logged: run {report['aemo_run']}")
+    print(f"AEMO outlook used for today's price models: {report.get('aemo_today', False)}")
     for lead in ["today", "tomorrow"]:
         m = report[lead]
         print(f"[{lead}] validation (last 28 days, {m['val_spikes']} spikes): "
@@ -32,11 +34,3 @@ if __name__ == "__main__":
     if cutoff is None:
         save_forecast(forecast)
         print("Saved to data/forecasts/latest_forecast.csv and appended to forecast_log.csv")
-
-        # Benchmark: AEMO's own PD7DAY price for today, as published before 06:00.
-        # Optional: a NEMweb hiccup must not block the forecast itself.
-        try:
-            bench = save_benchmark(report["cutoff"])
-            print(f"AEMO PD7DAY benchmark saved: run {bench['run_datetime'].iloc[0]}, {len(bench)} intervals")
-        except Exception as e:  # noqa: BLE001
-            print(f"WARNING: AEMO PD7DAY benchmark not saved: {e}")

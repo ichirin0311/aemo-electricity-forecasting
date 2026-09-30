@@ -41,10 +41,15 @@ benchmark repeats the price at the same time on the latest day known at issue.
 
 | Horizon | Normal MAE | Naive MAE | Normal R² | Months beating naive | Risk ceiling coverage (target 90%) |
 |---|---|---|---|---|---|
-| Today (6-24h ahead) | **$27.92** | $42.70 | 0.531 | 20 / 20 | 87.8% |
+| Today (6-24h ahead) | **$21.55** | $42.70 | 0.674 | 20 / 20 | 88.5% |
 | Tomorrow (24-48h ahead) | **$30.86** | $51.44 | 0.449 | 20 / 20 | 89.4% |
 
 Demand forecast R²: 0.869 (today), 0.853 (tomorrow).
+
+**Against AEMO's own outlook** (today's forecast vs AEMO's PD7DAY pre-dispatch
+price published before 06:00, compared per half hour): typical error $13.4 vs
+$15.6/MWh (better in 20 / 20 months), and the risk ceiling flagged 62% of
+spikes with 21% of flags being real, vs 61% and 17% for AEMO's outlook.
 
 What the models **cannot** do: predict how large a spike will be one or two
 days out. Spike-period errors (~$1,900/MWh) are close to the naive benchmark.
@@ -82,13 +87,22 @@ The actual cause was Cloudflare rejecting Python `urllib`'s default
 User-Agent. With `requests`, the monthly CSVs download fine, including from
 GitHub Actions runners.
 
+**5. AEMO's own outlook is a strong input, but only up to the bid deadline.**
+On its own, AEMO's 7-day pre-dispatch price was closer than my model on
+typical half-hours, yet its average error was four times worse because it
+occasionally projects very high prices that never happen. For days whose
+generator bids aren't in yet (due around 12:30 the day before), it sits at
+the market price cap in ~10% of half-hours, so it is only usable for today's
+forecast. Feeding it into today's model as an input, and letting the model
+learn when to trust it, cut normal MAE by 23% (better in 20 / 20 months) and
+made the risk ceiling catch more spikes with fewer false alarms.
+
 ## How it works
 
 ```
 AEMO monthly price/demand CSVs ──┐
-                                 ├──> features known at issue time ──> LightGBM (per horizon) ──> data/forecasts/
-Open-Meteo temperature ──────────┘    (archive for history,             demand / central / Q90
-                                       forecast API for the future)
+Open-Meteo temperature ──────────┼──> features known at issue time ──> LightGBM (per horizon) ──> data/forecasts/
+AEMO PD7DAY price outlook ───────┘    (outlook: today's price only)     demand / central / Q90
 
 GitHub Actions (daily): download → retrain → forecast → commit → Streamlit Cloud redeploys
 ```
@@ -97,8 +111,9 @@ GitHub Actions (daily): download → retrain → forecast → commit → Streaml
 
 - **Only information available at issue time**: prices and demand up to the
   previous midnight, the same time on the latest day and a week earlier,
-  calendar features, and a temperature forecast. AEMO's CSV is refreshed at
-  00:00 market time, so a morning forecast always has yesterday complete.
+  calendar features, a temperature forecast, and (for today) AEMO's price
+  outlook as published before 06:00. AEMO's CSV is refreshed at 00:00 market
+  time, so a morning forecast always has yesterday complete.
 - **Separate central and risk-ceiling models** rather than one blended
   prediction. Four blending/routing approaches were tried in v1 (classifier
   routing, dollar-scale and arcsinh-space blending, self-routing on the
@@ -120,6 +135,7 @@ run_day_ahead.py           daily forecast (today + tomorrow); run by GitHub Acti
 run_backtest.py            walk-forward evaluation (monthly retrain)
 src/day_ahead.py           data assembly, features, training, forecasting
 src/aemo_downloader.py     AEMO monthly CSV download with caching and retries
+src/aemo_pd7day.py         AEMO PD7DAY outlook: archive + live download, as-of-issue selection
 src/dashboard_data.py      data loading and analysis for the dashboard
 src/app.py                 Streamlit dashboard
 experiments/               feasibility and target-transform experiments
@@ -181,6 +197,7 @@ are not comparable with the v2 forecast results above.
 ## Data sources
 
 - [AEMO aggregated price and demand data](https://www.aemo.com.au) (5-minute, NSW1)
+- AEMO PD7DAY pre-dispatch price outlook ([NEMweb](https://www.nemweb.com.au) MMSDM archive and current reports)
 - [Open-Meteo](https://open-meteo.com): Historical Weather API and Forecast API
 - [NEMOSIS](https://github.com/UNSW-CEEM/NEMOSIS) for AEMO MMSDM tables (v1 only)
 
