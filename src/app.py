@@ -342,7 +342,8 @@ with tab_regime:
 with tab_strategy:
     st.subheader("💰 What if you had acted on the risk ceiling?")
     st.caption(
-        "Walk-forward backtest: for each month, the models were trained only on the 365 days before it, "
+        "Walk-forward backtest: for each month, the models were trained only on data before it "
+        "(730 days for today's forecast, 365 for tomorrow's), "
         "then forecast every day of that month. Nothing after the forecast date was used."
     )
 
@@ -433,7 +434,8 @@ with tab_strategy:
             "- **Inputs**: only information available at issue time: prices and demand up to the previous "
             "midnight, same time on the latest day and a week earlier, calendar, temperature forecast; "
             "today's price models also use AEMO's PD7DAY outlook published before 06:00\n"
-            "- Retrained every morning on the latest 365 days; separate models for today and tomorrow"
+            "- Retrained every morning on the latest 730 days (today) / 365 days (tomorrow); "
+            "separate models for each horizon"
         )
 
         st.markdown("##### Today's forecast vs AEMO PD7DAY (walk-forward, 30-minute)")

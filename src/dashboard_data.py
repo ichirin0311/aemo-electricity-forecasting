@@ -25,6 +25,8 @@ MODEL_LABELS = {
     "v2.1": "v2.1 - bias fix (median objective)",
     "v2.2": "v2.2 - + AEMO outlook (today)",
     "v2.2-noaemo": "v2.2 - AEMO outlook unavailable that day",
+    "v2.3": "v2.3 - 2-year training window (today)",
+    "v2.3-noaemo": "v2.3 - AEMO outlook unavailable that day",
 }
 
 

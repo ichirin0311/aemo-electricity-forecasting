@@ -14,11 +14,10 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 
-from src.day_ahead import (LEADS, RRP_FEATURES, SPIKE, assemble_frame, build_features, load_aemo_actuals,
+from src.day_ahead import (LEADS, RRP_FEATURES, SPIKE, TRAIN_DAYS, assemble_frame, build_features, load_aemo_actuals,
                            load_aemo_asof, predict_lead, price_feature_cols, train_lead_models)
 
 REGION, LAT, LON = "NSW", -33.86, 151.20
-TRAIN_DAYS = 365
 OUT_DIR = os.path.join("data", "backtest")
 
 
@@ -41,14 +40,16 @@ def metrics(df: pd.DataFrame) -> dict:
     }
 
 
-def load_backtest_frame(first: pd.Period, last: pd.Period) -> pd.DataFrame:
-    start = first.start_time - pd.Timedelta(days=TRAIN_DAYS + 7 + max(LEADS.values()) + 1)
+def load_backtest_frame(first: pd.Period, last: pd.Period, train_days: int | None = None) -> pd.DataFrame:
+    train_days = train_days or max(TRAIN_DAYS.values())
+    start = first.start_time - pd.Timedelta(days=train_days + 7 + max(LEADS.values()) + 1)
     end = (last + 1).start_time  # last interval of the last month is 00:00 of the next month
     actuals = load_aemo_actuals(f"{REGION}1", start, end)
     return assemble_frame(actuals, REGION, cutoff=end, horizon_end=end, lat=LAT, lon=LON)
 
 
-def walk_forward(df: pd.DataFrame, months, leads=LEADS, verbose=True, aemo=None, **train_kwargs):
+def walk_forward(df: pd.DataFrame, months, leads=LEADS, verbose=True, aemo=None, train_days: int | None = None,
+                 **train_kwargs):
     """
     Monthly-retrained walk-forward. Returns (monthly metrics, all predictions).
     aemo: AEMO PD7DAY as-of log (load_aemo_asof()) to use as a "today" price input, or None.
@@ -59,7 +60,8 @@ def walk_forward(df: pd.DataFrame, months, leads=LEADS, verbose=True, aemo=None,
         train_kwargs["price_features"] = price_feature_cols(lead_days, aemo is not None)
         for month in months:
             cutoff = month.start_time
-            models, _ = train_lead_models(feat, cutoff, train_days=TRAIN_DAYS, **train_kwargs)
+            days = train_days or TRAIN_DAYS[lead_name]  # an explicit int applies to every lead
+            models, _ = train_lead_models(feat, cutoff, train_days=days, **train_kwargs)
             target = feat[(feat["settlementdate"] > cutoff)
                           & (feat["settlementdate"] <= (month + 1).start_time)]
             target = target.dropna(subset=RRP_FEATURES + ["rrp", "totaldemand"])

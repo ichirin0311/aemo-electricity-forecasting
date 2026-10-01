@@ -29,7 +29,7 @@ if __name__ == "__main__":
 
     runs = {}
     for name, a in [("without AEMO", None), ("with AEMO", aemo)]:
-        monthly, preds = walk_forward(df, months, leads=leads, verbose=False, aemo=a)
+        monthly, preds = walk_forward(df, months, leads=leads, verbose=False, aemo=a, train_days=365)
         runs[name] = (monthly, preds)
         print(f"done: {name}", flush=True)
 

@@ -393,17 +393,34 @@ for demand.
   v2.2 + AEMO; `v2.2-noaemo` if the outlook was unavailable that morning).
   The dashboard's track record splits by it.
 
+### Training window per lead: model v2.3 (2026-10, issue #5)
+`experiments/training_window.py`. Question: spikes became far rarer in
+2026 even at the same demand level, so should old regimes be dropped or
+down-weighted? Compared 365 / 180 / 730 days and 365 days with recency
+weights (half-life 180 / 90 days on the price models), judged pooled, by
+year, and on high-demand intervals (actual >= 10 GW, 867 spike intervals).
+- **180 days is unsafe**: worse normal MAE and far weaker on high-demand
+  days (tomorrow: high-demand spikes flagged 62% -> 23%, none in 2026).
+- **Recency weighting**: no consistent gain (beat 365d in 4-9/20 months).
+- **730 days**: today, same normal MAE but every spike metric better
+  (flagged 60% -> 65%, high-demand 68% -> 75%, coverage 88.3% -> 89.3%);
+  tomorrow, normal MAE slightly better but spike flags weaker (48% -> 42%).
+- **Adopted (v2.3)**: `TRAIN_DAYS = {"today": 730, "tomorrow": 365}` in
+  `src/day_ahead.py`. Older experiments pin `train_days=365` so their
+  recorded numbers still reproduce. Rows before 2024-04-24 have no AEMO
+  features (NaN), which LightGBM handles.
+- Takeaway for #5: don't drop old regimes. Calm months dominate recent
+  data, but extreme-demand days still need the spiky history.
+
 ## Not Yet Started / Future Candidates (Updated)
 
 Done since v2 started: dashboard switched to v2 (`src/app.py` +
 `src/dashboard_data.py`: Outlook, Track record, Market regime, Risk strategy
 backtest), README rewritten (v1 numbers labelled as using same-interval
-actuals), PD7DAY benchmark, PD7DAY as input (v2.2).
+actuals), PD7DAY benchmark, PD7DAY as input (v2.2), training-window
+decision for issue #5 (v2.3).
 
 - Step 3: STPASA (forecast demand / available capacity, ~220MB/month
   archive) as inputs, which would bring back a forecast reserve margin
 - Using PD7DAY for "tomorrow" would require issuing after ~13:00
-- Issue #5: decide how the training window treats older regimes. Spike
-  probability at the same demand level fell sharply in 2026 (9-10 GW: 1.89%
-  in 2025 vs 0.06% in 2026), but >11 GW still spikes ~10% of the time
 - Scenario comparison (issue #4) only if a clear use case appears

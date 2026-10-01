@@ -19,7 +19,8 @@ A single "expected price" hides that risk, so every forecast has two parts:
    stay below about 90% of the time
 
 Every morning (market time), GitHub Actions downloads the latest AEMO data,
-retrains the models on the most recent 365 days, issues a forecast for today
+retrains the models (on the last 2 years for today, 1 year for tomorrow),
+issues a forecast for today
 (6-24h ahead) and tomorrow (24-48h ahead), and commits it to the repo. The
 dashboard redeploys automatically.
 
@@ -35,21 +36,21 @@ dashboard redeploys automatically.
 ## Results
 
 Walk-forward backtest, January 2025 to August 2026 (20 months). For each
-month, the models were trained only on the 365 days before it, then forecast
-every day of that month. "Normal" means prices below $300/MWh. The naive
+month, the models were trained only on data before it (730 days for today,
+365 for tomorrow), then forecast every day of that month. "Normal" means prices below $300/MWh. The naive
 benchmark repeats the price at the same time on the latest day known at issue.
 
 | Horizon | Normal MAE | Naive MAE | Normal R² | Months beating naive | Risk ceiling coverage (target 90%) |
 |---|---|---|---|---|---|
-| Today (6-24h ahead) | **$21.55** | $42.70 | 0.674 | 20 / 20 | 88.5% |
+| Today (6-24h ahead) | **$21.56** | $42.70 | 0.675 | 20 / 20 | 89.3% |
 | Tomorrow (24-48h ahead) | **$30.86** | $51.44 | 0.449 | 20 / 20 | 89.4% |
 
-Demand forecast R²: 0.869 (today), 0.853 (tomorrow).
+Demand forecast R²: 0.884 (today), 0.853 (tomorrow).
 
 **Against AEMO's own outlook** (today's forecast vs AEMO's PD7DAY pre-dispatch
-price published before 06:00, compared per half hour): typical error $13.4 vs
-$15.6/MWh (better in 20 / 20 months), and the risk ceiling flagged 62% of
-spikes with 21% of flags being real, vs 61% and 17% for AEMO's outlook.
+price published before 06:00, compared per half hour): typical error $13.5 vs
+$15.6/MWh (better in 18 / 20 months), and the risk ceiling flagged 65% of
+spikes with 20% of flags being real, vs 61% and 17% for AEMO's outlook.
 
 What the models **cannot** do: predict how large a spike will be one or two
 days out. Spike-period errors (~$1,900/MWh) are close to the naive benchmark.
@@ -80,6 +81,16 @@ prices became rare. Public reporting links this to growing battery storage
 A model trained on the past year can quietly go stale, so the dashboard
 compares recent spike rates with the training window and tracks risk ceiling
 coverage month by month.
+
+But the change is not the whole story: at the same demand level spikes
+became an order of magnitude rarer (9-10 GW: 1.9% of intervals in 2025, 0.06%
+in 2026), yet above 11 GW they still happen ~10% of the time. So I tested
+whether to drop or down-weight the older, spikier data. Training on only the
+last 180 days made the risk ceiling miss most spikes on high-demand days
+(tomorrow: 62% flagged → 23%), and recency weighting gave no consistent gain.
+Extending today's window to 2 years kept normal-price accuracy and improved
+every spike metric, so calm recent months don't make the model complacent
+about extreme days.
 
 **4. The "blocked" AEMO download was a User-Agent problem.** Automated
 downloads had failed with HTTP 403, which looked like AEMO blocking scripts.
@@ -123,8 +134,8 @@ GitHub Actions (daily): download → retrain → forecast → commit → Streaml
   forces a large log shift that flattens normal-range variation. The central
   model uses a scaled arcsinh with a median objective (see finding 2); the
   risk ceiling is LightGBM quantile regression at α = 0.9.
-- **Rolling 365-day window, retrained daily**, with separate models for each
-  horizon.
+- **Rolling window, retrained daily**, with separate models for each
+  horizon: 730 days for today, 365 for tomorrow (see finding 3).
 - **AEMO market time is fixed UTC+10** (no daylight saving), so weather data
   is converted with `Etc/GMT-10`, not `Australia/Sydney`.
 

@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
     summary, monthly_bias = [], {}
     for name, kwargs in variants.items():
-        monthly, preds = walk_forward(df, months, leads=leads, verbose=False, **kwargs)
+        monthly, preds = walk_forward(df, months, leads=leads, verbose=False, train_days=365, **kwargs)
         for lead, g in preds.groupby("lead", sort=False):
             n = g["rrp"] < SPIKE
             err = (g["rrp_base_prediction"] - g["rrp"])[n]

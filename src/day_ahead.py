@@ -32,8 +32,13 @@ SPIKE = 300
 INTERVALS_PER_DAY = 288
 # Recorded with every live forecast so the track record can be split by model.
 # v2.0 L2 on asinh(rrp) (ran low) -> v2.1 L1 on asinh(rrp/100) -> v2.2 + AEMO PD7DAY input (today lead)
-MODEL_VERSION = "v2.2"
+# -> v2.3 730-day training window for "today"
+MODEL_VERSION = "v2.3"
 LEADS = {"today": 1, "tomorrow": 2}
+# Training window per lead (experiments/training_window.py, issue #5). Shortening or down-weighting
+# older data hurt spike detection on high-demand days; 730 days improved every spike metric for
+# "today" at the same normal MAE, but weakened spike flags for "tomorrow", which keeps 365.
+TRAIN_DAYS = {"today": 730, "tomorrow": 365}
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -221,8 +226,8 @@ def price_inputs(df: pd.DataFrame, cols: list[str] = RRP_FEATURES) -> pd.DataFra
 
 # ---------------------------------------------------------------- models
 
-def _fit(params, X_tr, y_tr, X_va, y_va):
-    return lgb.train(params, lgb.Dataset(X_tr, y_tr), num_boost_round=1000,
+def _fit(params, X_tr, y_tr, X_va, y_va, weight=None):
+    return lgb.train(params, lgb.Dataset(X_tr, y_tr, weight=weight), num_boost_round=1000,
                      valid_sets=[lgb.Dataset(X_va, y_va)],
                      callbacks=[lgb.early_stopping(50, verbose=False)])
 
@@ -231,7 +236,8 @@ def train_lead_models(df_feat: pd.DataFrame, cutoff: pd.Timestamp,
                       train_days: int = 365, val_days: int = 28,
                       base_scale: float = BASE_SCALE, q90_scale: float = Q90_SCALE,
                       base_params: dict | None = None,
-                      price_features: list[str] | None = None) -> tuple[dict, dict]:
+                      price_features: list[str] | None = None,
+                      half_life_days: float | None = None) -> tuple[dict, dict]:
     """
     Train demand / central price / Q90 models on the train_days before the cutoff;
     the last val_days are held out for early stopping and reported as metrics.
@@ -246,14 +252,19 @@ def train_lead_models(df_feat: pd.DataFrame, cutoff: pd.Timestamp,
     hist = hist.dropna(subset=RRP_FEATURES + ["rrp", "totaldemand"])
     val_start = cutoff - pd.Timedelta(days=val_days)
     tr, va = hist[hist["settlementdate"] <= val_start], hist[hist["settlementdate"] > val_start]
+    # Optional recency weighting for the price models: weight 0.5 ** (age / half_life)
+    w = None
+    if half_life_days:
+        age_days = (cutoff - tr["settlementdate"]).dt.total_seconds() / 86400
+        w = np.power(0.5, age_days / half_life_days).values
 
     models = {
         "demand": _fit(PARAMS_DEMAND, tr[DEMAND_FEATURES], tr["totaldemand"],
                        va[DEMAND_FEATURES], va["totaldemand"]),
         "base": _fit(base_params, price_inputs(tr, cols), np.arcsinh(tr["rrp"] / base_scale),
-                     price_inputs(va, cols), np.arcsinh(va["rrp"] / base_scale)),
+                     price_inputs(va, cols), np.arcsinh(va["rrp"] / base_scale), weight=w),
         "q90": _fit(PARAMS_Q90, price_inputs(tr, cols), np.arcsinh(tr["rrp"] / q90_scale),
-                    price_inputs(va, cols), np.arcsinh(va["rrp"] / q90_scale)),
+                    price_inputs(va, cols), np.arcsinh(va["rrp"] / q90_scale), weight=w),
         "base_scale": base_scale, "q90_scale": q90_scale, "price_features": cols,
     }
 
@@ -305,7 +316,7 @@ def latest_cutoff(actuals: pd.DataFrame) -> pd.Timestamp:
 
 
 def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
-                  cutoff: pd.Timestamp | None = None, train_days: int = 365,
+                  cutoff: pd.Timestamp | None = None, train_days: dict | None = None,
                   use_aemo: bool = True) -> tuple[pd.DataFrame, dict]:
     """
     Issue the "today" + "tomorrow" forecast. cutoff = D 00:00 (market time): actuals
@@ -315,7 +326,8 @@ def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
     """
     region_id = f"{region.upper()}1"
     now = pd.Timestamp(datetime.now(AEMO_TZ).replace(tzinfo=None))
-    history_days = train_days + 7 + max(LEADS.values()) + 1  # window + 7d lag + lead lag
+    train_days = train_days or TRAIN_DAYS
+    history_days = max(train_days.values()) + 7 + max(LEADS.values()) + 1  # window + 7d lag + lead lag
     live = cutoff is None
     requested = cutoff if cutoff is not None else now.normalize()
 
@@ -346,7 +358,7 @@ def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
 
     for lead_name, lead_days in LEADS.items():
         feat = build_features(df, lead_days, aemo)
-        models, metrics = train_lead_models(feat, cutoff, train_days=train_days,
+        models, metrics = train_lead_models(feat, cutoff, train_days=train_days[lead_name],
                                             price_features=price_feature_cols(lead_days, aemo is not None))
         report[lead_name] = metrics
 
@@ -363,7 +375,7 @@ def run_day_ahead(region: str = "NSW", lat: float = -33.86, lon: float = 151.20,
 
     forecast = pd.concat(forecasts, ignore_index=True)
     forecast.insert(0, "issue_date", issue_day.date())
-    forecast["model_version"] = MODEL_VERSION if (report.get("aemo_today") or not use_aemo) else "v2.2-noaemo"
+    forecast["model_version"] = MODEL_VERSION if (report.get("aemo_today") or not use_aemo) else f"{MODEL_VERSION}-noaemo"
     return forecast, report
 
 
