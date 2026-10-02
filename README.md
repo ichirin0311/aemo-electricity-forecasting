@@ -32,6 +32,14 @@ ahead), and commits it to the repo. The dashboard redeploys automatically.
 | 🌡️ **Market regime** | Is the market calmer or spikier than the models' training period? Compare any two periods side by side |
 | 💰 **Risk strategy backtest** | What would acting on the risk ceiling have saved, and how many warnings were real spikes? |
 
+![Outlook: actual prices for the last two days, then today's and tomorrow's central forecast with the 90% risk ceiling band and AEMO's own outlook](docs/images/outlook.png)
+
+*Outlook tab: the shaded band runs from the central forecast up to the risk ceiling; the dashed line is AEMO's own outlook for today.*
+
+![Risk strategy backtest: cost with and without curtailing demand when the risk ceiling crosses the warning line, plus how many spikes were flagged and how many flags were real](docs/images/metrics.png)
+
+*Risk strategy backtest tab (today's forecast, Jan 2025 - Aug 2026, warning line $300, 5-minute intervals). Most flags are precautionary: the ceiling is a 90% upper bound, not a spike prediction.*
+
 ## Results
 
 Walk-forward backtest, January 2025 to August 2026 (20 months). For each
@@ -46,6 +54,11 @@ on the latest day known at issue.
 | Tomorrow (24-48h ahead) | **$30.86** | $51.44 | 0.449 | 20 / 20 | 89.4% |
 
 Demand forecast R²: 0.884 (today), 0.853 (tomorrow).
+
+![Risk ceiling coverage by month: share of 5-minute intervals below the ceiling, against the 90% target](docs/images/risk_ceiling.png)
+
+Coverage is close to the 90% target over the whole period but swings from
+month to month, which is why the dashboard tracks it over time.
 
 **Against AEMO's own outlook** (today's forecast vs AEMO's PD7DAY pre-dispatch
 price published before 06:00, compared per half hour): typical error $13.5 vs
@@ -96,6 +109,14 @@ prices became rare. Public reporting links this to growing battery storage
 A model trained on the past year can quietly go stale, so the dashboard
 compares recent spike rates with the training window and tracks risk ceiling
 coverage month by month.
+
+<p>
+  <img src="docs/images/spike_intervals.png" width="49%" alt="Spike intervals per month, 2023 to 2026: frequent through 2025, nearly zero from March 2026">
+  <img src="docs/images/median_price.png" width="49%" alt="Median price by hour of day, July-September 2025 vs 2026: the evening peak is much lower in 2026">
+</p>
+
+*Left: spike intervals per month. Right: median price by hour of day for the
+same three months in 2025 (A) and 2026 (B); the evening peak flattened.*
 
 But the change is not the whole story: at the same demand level spikes
 became an order of magnitude rarer (9-10 GW: 1.9% of intervals in 2025, 0.06%

@@ -135,7 +135,7 @@ with tab_outlook:
                              fillcolor="rgba(245,133,24,0.15)"))
     aemo_today = aemo_log[aemo_log["issue_date"] == issue_date]
     if not aemo_today.empty:
-        fig.add_trace(aemo_trace(aemo_today, name="AEMO outlook (today)"))
+        fig.add_trace(aemo_trace(aemo_today, name="AEMO outlook"))
     fig.add_hline(y=risk_threshold, line_dash="dash", line_color="grey",
                   annotation_text=f"Warning line (${risk_threshold})", annotation_position="top left")
     fig.add_vline(x=cutoff, line_dash="dot", line_color="grey")
@@ -279,7 +279,7 @@ with tab_regime:
     for lead_name, color in [("today", C_CENTRAL), ("tomorrow", C_RISK)]:
         m = bt_monthly[bt_monthly["lead"] == lead_name]
         fig_c.add_trace(go.Scatter(x=pd.to_datetime(m["month"]), y=m["q90_coverage"] * 100, mode="lines+markers",
-                                   name=f"{lead_name.capitalize()} forecast", line=dict(color=color)))
+                                   name=lead_name.capitalize(), line=dict(color=color)))
     fig_c.add_hline(y=90, line_dash="dash", line_color="grey", annotation_text="Target 90%")
     fig_c.update_layout(height=320, title="Risk ceiling coverage by month (walk-forward backtest)",
                         yaxis_title="% of intervals below the ceiling", legend=dict(orientation="h", y=-0.25),
@@ -302,8 +302,8 @@ with tab_regime:
     else:
         pa = period_profile(actuals, *period_a, spike_threshold)
         pb = period_profile(actuals, *period_b, spike_threshold)
-        label_a = f"A: {period_a[0]:%d %b %Y} - {period_a[1]:%d %b %Y}"
-        label_b = f"B: {period_b[0]:%d %b %Y} - {period_b[1]:%d %b %Y}"
+        label_a = f"A: {period_a[0]:%d %b %y} - {period_a[1]:%d %b %y}"
+        label_b = f"B: {period_b[0]:%d %b %y} - {period_b[1]:%d %b %y}"
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Average price (B)", f"${pb['mean_price']:,.0f}", f"{pb['mean_price'] - pa['mean_price']:+,.0f} vs A",
