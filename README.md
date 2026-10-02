@@ -18,11 +18,10 @@ A single "expected price" hides that risk, so every forecast has two parts:
 2. **Risk ceiling**: a 90th-percentile upper bound that actual prices should
    stay below about 90% of the time
 
-Every morning (market time), GitHub Actions downloads the latest AEMO data,
-retrains the models (on the last 2 years for today, 1 year for tomorrow),
-issues a forecast for today
-(6-24h ahead) and tomorrow (24-48h ahead), and commits it to the repo. The
-dashboard redeploys automatically.
+Early every morning (market time), GitHub Actions downloads the latest AEMO
+data, retrains the models (on the last 2 years for today, 1 year for
+tomorrow), issues a forecast for today (6-24h ahead) and tomorrow (24-48h
+ahead), and commits it to the repo. The dashboard redeploys automatically.
 
 ## Dashboard
 
@@ -37,8 +36,9 @@ dashboard redeploys automatically.
 
 Walk-forward backtest, January 2025 to August 2026 (20 months). For each
 month, the models were trained only on data before it (730 days for today,
-365 for tomorrow), then forecast every day of that month. "Normal" means prices below $300/MWh. The naive
-benchmark repeats the price at the same time on the latest day known at issue.
+365 for tomorrow), then forecast every day of that month. "Normal" means
+prices below $300/MWh. The naive benchmark repeats the price at the same time
+on the latest day known at issue.
 
 | Horizon | Normal MAE | Naive MAE | Normal R² | Months beating naive | Risk ceiling coverage (target 90%) |
 |---|---|---|---|---|---|
@@ -53,9 +53,14 @@ $15.6/MWh (better in 18 / 20 months), and the risk ceiling flagged 65% of
 spikes with 20% of flags being real, vs 61% and 17% for AEMO's outlook.
 
 What the models **cannot** do: predict how large a spike will be one or two
-days out. Spike-period errors (~$1,900/MWh) are close to the naive benchmark.
-That is why the risk ceiling exists as a separate output rather than trying
-to fold spikes into the central forecast.
+days out. Spike-period errors stay around $1,800-1,900/MWh, only modestly
+better than the naive benchmark (~$2,100). That is why the risk ceiling exists
+as a separate output rather than trying to fold spikes into the central
+forecast.
+
+Since 27 September 2026, every live forecast has also been saved before its
+target day and scored once actual prices arrive; the dashboard's Track record
+tab shows that forward-only record, split by model version.
 
 ## Things I found along the way
 
@@ -74,7 +79,17 @@ to an L1 (median) objective on arcsinh(price / 100) removed the bias
 (-$16.4 to -$0.2) and cut normal MAE by 12%. A single test month had not
 revealed this.
 
-**3. The market changed under the models.** Spikes (≥ $300/MWh) fell from
+**3. AEMO's own outlook is a strong input, but only up to the bid deadline.**
+On its own, AEMO's 7-day pre-dispatch price was closer than my model on
+typical half-hours, yet its average error was four times worse because it
+occasionally projects very high prices that never happen. For days whose
+generator bids aren't in yet (due around 12:30 the day before), it sits at
+the market price cap in ~10% of half-hours, so it is only usable for today's
+forecast. Feeding it into today's model as an input, and letting the model
+learn when to trust it, cut normal MAE by 23% (better in 20 / 20 months) and
+made the risk ceiling catch more spikes with fewer false alarms.
+
+**4. The market changed under the models.** Spikes (≥ $300/MWh) fell from
 40-389 per month in 2025 to 0-15 per month from March 2026, and negative
 prices became rare. Public reporting links this to growing battery storage
 ([issue #5](https://github.com/ichirin0311/aemo-electricity-forecasting/issues/5)).
@@ -92,21 +107,11 @@ Extending today's window to 2 years kept normal-price accuracy and improved
 every spike metric, so calm recent months don't make the model complacent
 about extreme days.
 
-**4. The "blocked" AEMO download was a User-Agent problem.** Automated
+**5. The "blocked" AEMO download was a User-Agent problem.** Automated
 downloads had failed with HTTP 403, which looked like AEMO blocking scripts.
 The actual cause was Cloudflare rejecting Python `urllib`'s default
 User-Agent. With `requests`, the monthly CSVs download fine, including from
 GitHub Actions runners.
-
-**5. AEMO's own outlook is a strong input, but only up to the bid deadline.**
-On its own, AEMO's 7-day pre-dispatch price was closer than my model on
-typical half-hours, yet its average error was four times worse because it
-occasionally projects very high prices that never happen. For days whose
-generator bids aren't in yet (due around 12:30 the day before), it sits at
-the market price cap in ~10% of half-hours, so it is only usable for today's
-forecast. Feeding it into today's model as an input, and letting the model
-learn when to trust it, cut normal MAE by 23% (better in 20 / 20 months) and
-made the risk ceiling catch more spikes with fewer false alarms.
 
 ## How it works
 
@@ -135,7 +140,7 @@ GitHub Actions (daily): download → retrain → forecast → commit → Streaml
   model uses a scaled arcsinh with a median objective (see finding 2); the
   risk ceiling is LightGBM quantile regression at α = 0.9.
 - **Rolling window, retrained daily**, with separate models for each
-  horizon: 730 days for today, 365 for tomorrow (see finding 3).
+  horizon: 730 days for today, 365 for tomorrow (see finding 4).
 - **AEMO market time is fixed UTC+10** (no daylight saving), so weather data
   is converted with `Etc/GMT-10`, not `Australia/Sydney`.
 
@@ -149,7 +154,8 @@ src/aemo_downloader.py     AEMO monthly CSV download with caching and retries
 src/aemo_pd7day.py         AEMO PD7DAY outlook: archive + live download, as-of-issue selection
 src/dashboard_data.py      data loading and analysis for the dashboard
 src/app.py                 Streamlit dashboard
-experiments/               feasibility and target-transform experiments
+experiments/               the experiment behind each modeling decision (feasibility,
+                           target transform, AEMO outlook, training window)
 .github/workflows/         daily pipeline
 data/forecasts/            latest forecast + forecast log (updated daily)
 data/backtest/             walk-forward results
@@ -182,7 +188,7 @@ Backtest as if the forecast had been issued on a past morning (prints only):
 python run_day_ahead.py 2025-12-01
 ```
 
-Re-run the 20-month walk-forward evaluation (about 5 minutes):
+Re-run the 20-month walk-forward evaluation (several minutes):
 
 ```bash
 python run_backtest.py
