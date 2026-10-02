@@ -116,7 +116,9 @@ coverage month by month.
 </p>
 
 *Left: spike intervals per month. Right: median price by hour of day for the
-same three months in 2025 (A) and 2026 (B); the evening peak flattened.*
+same three months in 2025 (A) and 2026 (B). The evening peak flattened and the
+midday solar dip filled in (from about $0 to about $43/MWh), consistent with
+batteries charging at midday and discharging into the evening peak.*
 
 But the change is not the whole story: at the same demand level spikes
 became an order of magnitude rarer (9-10 GW: 1.9% of intervals in 2025, 0.06%
