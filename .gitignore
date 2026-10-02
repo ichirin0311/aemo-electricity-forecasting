@@ -27,11 +27,14 @@ data/raw/pd7day/
 # --- AEMOの単発検証用CSV（sydney_weather.csv等）は除外。price/demandのCSVは含める ---
 data/raw/sydney_weather.csv
 
-# --- 静的HTMLダッシュボード（Streamlitアプリと重複するため除外） ---
+# --- v1の静的HTMLレポートの出力（src/visualize.py は削除済み） ---
 data/processed/rrp_dashboard.html
 
 # --- data/raw/aemo_data_1year/ は GitHub Actions実行のため含める（.gitignoreしない） ---
 # --- data/processed/ のparquet, csvも含める ---
+
+# --- Claude Code のローカル設定（プレビュー起動用など） ---
+.claude/
 
 # --- OS / エディタ ---
 .DS_Store

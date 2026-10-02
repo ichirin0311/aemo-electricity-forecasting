@@ -310,7 +310,9 @@ issued in advance, so v1's normal R2=0.5667 is closer to a nowcast. Its top
 3 features by gain are all of this kind.
 
 ### Forecast definition
-- Issued each morning (Actions cron UTC 20:00 = 06:00 market time). AEMO's
+- Issued each morning. The nominal issue time is 06:00 market time (it
+  defines which AEMO PD7DAY run counts as published); Actions runs at UTC
+  16:00 = 02:00 market time because scheduled runs are often hours late. AEMO's
   PRICE_AND_DEMAND CSV is refreshed at 00:00 market time, so actuals are
   complete up to D 00:00.
 - Two leads, each with its own demand / central / Q90 models:
@@ -424,3 +426,31 @@ decision for issue #5 (v2.3).
   archive) as inputs, which would bring back a forecast reserve margin
 - Using PD7DAY for "tomorrow" would require issuing after ~13:00
 - Scenario comparison (issue #4) only if a clear use case appears
+
+
+以下 For Secretary
+
+## 進捗管理のルール
+
+このプロジェクトの進捗は、共有の台帳で管理する。
+
+- 台帳の場所: "G:\My Drive\secretary\tasks.md"
+- このプロジェクトのセクション名: 「aemo-electricity-forecasting」
+
+### 作業の前に
+- 台帳を読み、このプロジェクトのセクションにある未完了タスクと「次の一手」を確認する
+- 作業内容がタスクとずれているときは、先にそのことを伝える
+
+### 作業の後に
+- 完了したタスクにチェックを付ける（`- [x]`）
+- 「次の一手」を最新の状態に更新する
+- 新しく発生したタスクは、期限付きで追記する（期限が不明なら「期限: 未定」）
+- 先頭の「最終更新」の日付を今日に更新する
+
+### 守ること
+- 編集してよいのは、このプロジェクトのセクションだけ。他のセクションは変更しない
+- 既存のタスクを勝手に削除しない（不要なら、削除してよいか確認する）
+- 台帳にアクセスできない場合は、その旨を伝えて、台帳なしで作業を続ける
+
+
+ 

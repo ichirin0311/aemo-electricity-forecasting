@@ -2,7 +2,9 @@ name: Daily Pipeline Run
 
 on:
   schedule:
-    - cron: "0 20 * * *"
+    # UTC 16:00 = 02:00 market time (fixed UTC+10). AEMO refreshes its CSV at 00:00, and scheduled runs
+    # are often delayed by hours, so starting early still delivers the forecast by the morning.
+    - cron: "0 16 * * *"
   workflow_dispatch: {} 
 
 permissions:
