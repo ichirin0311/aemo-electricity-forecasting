@@ -126,7 +126,7 @@ with tab_outlook:
     fc = latest.sort_values("settlementdate")
 
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=recent["settlementdate"], y=recent["rrp"], name="Actual price (last 2 days)",
+    fig.add_trace(go.Scatter(x=recent["settlementdate"], y=recent["rrp"], name="Actual (last 2 days)",
                              line=dict(color=C_ACTUAL, width=1.5)))
     fig.add_trace(go.Scatter(x=fc["settlementdate"], y=fc["rrp_base_prediction"], name="Central forecast",
                              line=dict(color=C_CENTRAL, width=2)))
@@ -135,17 +135,18 @@ with tab_outlook:
                              fillcolor="rgba(245,133,24,0.15)"))
     aemo_today = aemo_log[aemo_log["issue_date"] == issue_date]
     if not aemo_today.empty:
-        fig.add_trace(aemo_trace(aemo_today, name="AEMO PD7DAY (today)"))
+        fig.add_trace(aemo_trace(aemo_today, name="AEMO outlook (today)"))
     fig.add_hline(y=risk_threshold, line_dash="dash", line_color="grey",
-                  annotation_text=f"Warning line (${risk_threshold})")
+                  annotation_text=f"Warning line (${risk_threshold})", annotation_position="top left")
     fig.add_vline(x=cutoff, line_dash="dot", line_color="grey")
     fig.add_vrect(x0=cutoff + pd.Timedelta(days=1), x1=cutoff + pd.Timedelta(days=2),
                   fillcolor="grey", opacity=0.06, line_width=0,
                   annotation_text="Tomorrow", annotation_position="top left")
     fig.add_annotation(x=cutoff, y=1, yref="paper", text="Forecast from here", showarrow=False,
                        xanchor="left", yanchor="bottom")
+    # Short names + normal order so the horizontal legend fits when the chart is exported as an image
     fig.update_layout(height=450, xaxis_title="Date/time (market time)", yaxis_title="Price ($/MWh)",
-                      legend=dict(orientation="h", y=-0.2), margin=dict(t=30))
+                      legend=dict(orientation="h", y=-0.2, traceorder="normal"), margin=dict(t=30))
     st.plotly_chart(fig, width="stretch")
 
     with st.expander("📉 Demand outlook"):
