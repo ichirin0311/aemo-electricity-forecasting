@@ -75,6 +75,13 @@ Since 27 September 2026, every live forecast has also been saved before its
 target day and scored once actual prices arrive; the dashboard's Track record
 tab shows that forward-only record, split by model version.
 
+![Track record: live forecasts scored against actual prices, one row per model version from v2.0 to v2.3](docs/images/track_record.png)
+
+*Track record tab (today's forecast, as of 4 October 2026). Each model
+version has only one to three scored days so far, so this shows how the
+record works rather than a result; the walk-forward numbers above are the
+evidence.*
+
 ## Things I found along the way
 
 **1. My first model's headline numbers relied on information a real forecast
