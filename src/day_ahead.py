@@ -23,6 +23,7 @@ import numpy as np
 import openmeteo_requests
 import pandas as pd
 import requests
+from retry_requests import retry
 from sklearn.metrics import mean_absolute_error, r2_score
 
 from src.aemo_downloader import AEMO_TZ, download_price_and_demand
@@ -41,6 +42,8 @@ LEADS = {"today": 1, "tomorrow": 2}
 TRAIN_DAYS = {"today": 730, "tomorrow": 365}
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+OPENMETEO_TIMEOUT = 60  # seconds per attempt (connect and read)
+OPENMETEO_RETRIES = 4   # with backoff, a dead endpoint fails in ~5-6 minutes instead of hanging
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 
 CALENDAR = ["month", "hour", "minute_of_day", "day_of_week", "is_holiday", "season"]
@@ -94,8 +97,18 @@ def load_aemo_actuals(region_id: str, start: pd.Timestamp, end: pd.Timestamp,
             .drop_duplicates("settlementdate").sort_values("settlementdate").reset_index(drop=True))
 
 
+def _openmeteo_client() -> openmeteo_requests.Client:
+    """
+    Open-Meteo client with retries. On 2026-10-09 the archive API hung during the TLS
+    handshake and, with no timeout set, the daily run waited ~18 minutes before failing.
+    """
+    session = retry(requests.Session(), retries=OPENMETEO_RETRIES, backoff_factor=2)
+    return openmeteo_requests.Client(session=session)
+
+
 def _hourly_temperature(client, url: str, params: dict) -> pd.Series:
-    resp = client.weather_api(url, params={**params, "hourly": "temperature_2m"})[0]
+    resp = client.weather_api(url, params={**params, "hourly": "temperature_2m"},
+                              timeout=OPENMETEO_TIMEOUT)[0]
     hourly = resp.Hourly()
     index = pd.date_range(
         start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
@@ -116,7 +129,7 @@ def load_temperature(start: pd.Timestamp, end: pd.Timestamp, cutoff: pd.Timestam
     For a historical cutoff (backtest) the forecast API can't reach back, so
     archive actuals are used throughout (slightly optimistic).
     """
-    client = openmeteo_requests.Client(session=requests.Session())
+    client = _openmeteo_client()
     # The archive rejects end_date beyond today (UTC); later hours come from the forecast API
     archive_end = min(end + pd.Timedelta(days=1), pd.Timestamp.now(tz="UTC").tz_localize(None))
     temp = _hourly_temperature(client, ARCHIVE_URL, {

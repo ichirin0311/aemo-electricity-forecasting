@@ -414,6 +414,17 @@ year, and on high-demand intervals (actual >= 10 GW, 867 spike intervals).
 - Takeaway for #5: don't drop old regimes. Calm months dominate recent
   data, but extreme-demand days still need the spiky history.
 
+### Operations notes
+- **Missed days are not backfilled.** The live record's value is that each
+  forecast was saved before its day. Gaps so far: 2026-10-03 (the cron change
+  skipped that day's run) and 2026-10-09 (below).
+- **2026-10-09 failure**: Open-Meteo's archive API hung during the TLS
+  handshake; with no timeout set, the run waited ~18 minutes and failed.
+  Open-Meteo calls now use a 60 s timeout and 4 retries with backoff
+  (`_openmeteo_client` in `src/day_ahead.py`), so an outage fails in ~5-6
+  minutes. Temperature is still required: if Open-Meteo is down for longer,
+  that day's forecast is skipped (AEMO calls already fall back gracefully).
+
 ## Not Yet Started / Future Candidates (Updated)
 
 Done since v2 started: dashboard switched to v2 (`src/app.py` +
