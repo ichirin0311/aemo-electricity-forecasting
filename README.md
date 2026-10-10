@@ -41,6 +41,10 @@ shown at the top of the Outlook tab (see [AI briefing](#ai-briefing)).
 
 *Outlook tab: the shaded band runs from the central forecast up to the risk ceiling; the dashed line is AEMO's own outlook for today.*
 
+![AI Market Briefing: a short plain-English summary of the day's forecast written by Claude, with a note that all 33 numbers in it were fact-checked against the forecast](docs/images/AI_brief.png)
+
+*AI Market Briefing at the top of the Outlook tab: written by Claude in the daily pipeline from facts computed in code; every number is checked against the forecast before it is saved (see [AI briefing](#ai-briefing)).*
+
 ![Risk strategy backtest: cost with and without curtailing demand when the risk ceiling crosses the warning line, plus how many spikes were flagged and how many flags were real](docs/images/metrics.png)
 
 *Risk strategy backtest tab (today's forecast, Jan 2025 - Aug 2026, warning line $300, 5-minute intervals). Most flags are precautionary: the ceiling is a 90% upper bound, not a spike prediction.*
