@@ -11,6 +11,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from src.ai_summary import MODEL_NAMES, count_numbers, load_summaries, summary_text  # noqa: E402
 from src.dashboard_data import (MODEL_LABELS, LEAD_DAYS, alert_quality, benchmark_metrics,  # noqa: E402
                                 load_actuals, load_aemo_log, load_backtest, load_backtest_benchmark,
                                 load_forecasts, monthly_regime, period_profile, price_metrics,
@@ -55,6 +56,7 @@ actuals = cached_actuals()
 latest, log = cached_forecasts()
 bt_monthly, bt_preds = cached_backtest()
 aemo_log, aemo_bt = cached_aemo()
+summaries = load_summaries()
 
 
 def aemo_trace(rows: pd.DataFrame, **kw) -> go.Scatter:
@@ -109,6 +111,24 @@ tab_outlook, tab_track, tab_regime, tab_strategy = st.tabs(
 with tab_outlook:
     st.subheader(f"Forecast issued {issue_date:%a %d %b %Y}")
     st.caption(f"Uses actual prices up to {cutoff:%d %b %H:%M} (market time) plus a temperature forecast.")
+
+    summary = next((e for e in reversed(summaries) if e["issue_date"] == f"{issue_date:%Y-%m-%d}"), None)
+    if summary:
+        is_llm = summary["source"] == "llm"
+        if is_llm:
+            model_name = MODEL_NAMES.get(summary["model"], summary["model"])
+            st.markdown(f"##### 🤖 AI Market Briefing · by {model_name}")
+            st.caption(f"Generated in the daily forecast pipeline · ✅ all {count_numbers(summary_text(summary))} "
+                       "numbers fact-checked against the forecast · risk level set by a fixed rule")
+        else:
+            st.markdown("##### 📝 Market Briefing (template)")
+        box = {"low": st.success, "elevated": st.warning, "high": st.error}[summary["risk_level"]]
+        text = "\n".join([f"**{summary['headline']}**", "", summary["summary"], "",
+                          *(f"- {p}" for p in summary["key_points"])])
+        box(text.replace("$", "\\$"), icon="🤖" if is_llm else "📝")  # unescaped $ pairs render as LaTeX
+        if not is_llm:
+            st.caption("Briefing from a fixed template (the AI-written version was unavailable or failed the "
+                       "number check that morning).")
 
     at_risk = latest[latest["rrp_risk_ceiling"] >= risk_threshold]
     peak = latest.loc[latest["rrp_risk_ceiling"].idxmax()]

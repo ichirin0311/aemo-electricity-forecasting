@@ -45,6 +45,9 @@ jobs:
       # v2: rolling-window forecast for today + tomorrow (appends to data/forecasts/forecast_log.csv)
       - name: Run day-ahead forecast
         run: python run_day_ahead.py
+        env:
+          # Optional: without it the dashboard summary falls back to a fixed template
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
       - name: Commit and push updated outputs
         run: |

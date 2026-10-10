@@ -8,6 +8,7 @@ import sys
 
 import pandas as pd
 
+from src.ai_summary import write_summary
 from src.day_ahead import run_day_ahead, save_forecast
 
 if __name__ == "__main__":
@@ -34,3 +35,10 @@ if __name__ == "__main__":
     if cutoff is None:
         save_forecast(forecast)
         print("Saved to data/forecasts/latest_forecast.csv and appended to forecast_log.csv")
+
+        # Plain-English summary for the dashboard (Claude; template fallback). Never fails the run.
+        try:
+            entry = write_summary()
+            print(f"Summary ({entry['source']}{', ' + entry['note'] if 'note' in entry else ''}): {entry['headline']}")
+        except Exception as e:  # noqa: BLE001
+            print(f"WARNING: summary not written: {e}")

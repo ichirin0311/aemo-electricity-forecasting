@@ -25,6 +25,8 @@ Early every morning (market time), GitHub Actions downloads the latest AEMO
 data, retrains the models (on the last 2 years for today, 1 year for
 tomorrow), issues a forecast for today (6-24h ahead) and tomorrow (24-48h
 ahead), and commits it to the repo. The dashboard redeploys automatically.
+The same run asks Claude for a short plain-English briefing of the forecast,
+shown at the top of the Outlook tab (see [AI briefing](#ai-briefing)).
 
 ## Dashboard
 
@@ -153,8 +155,32 @@ AEMO monthly price/demand CSVs ──┐
 Open-Meteo temperature ──────────┼──> features known at issue time ──> LightGBM (per horizon) ──> data/forecasts/
 AEMO PD7DAY price outlook ───────┘    (outlook: today's price only)     demand / central / Q90
 
-GitHub Actions (daily): download → retrain → forecast → commit → Streamlit Cloud redeploys
+GitHub Actions (daily): download → retrain → forecast → AI briefing → commit → Streamlit Cloud redeploys
 ```
+
+### AI briefing
+
+After the forecast is saved, `src/ai_summary.py` turns it into a short
+briefing with one call to the Claude API (Anthropic Python SDK). It is a
+pipeline step, not a chatbot: the dashboard only reads the saved result.
+
+- **Facts in, prose out.** Code computes a small JSON of rounded facts:
+  each day's central average and peak, the highest risk ceiling and hours at
+  or above $300, AEMO's outlook and how far it is from ours, yesterday's
+  actuals, the last 7 days' live track record, and the market regime. Claude
+  sees only this, with instructions not to speculate about causes.
+- **The risk level is a fixed rule in code** (low / elevated / high from the
+  risk ceiling and AEMO's outlook), not the model's judgement.
+- **Structured output and a number check.** The response is constrained to a
+  JSON schema (headline, summary, key points). Every number and HH:MM time
+  in it must match a fact; if one doesn't, the draft is rejected and kept in
+  the log for review.
+- **Never breaks the forecast.** If the key is missing, the API fails, or
+  the check rejects the draft, a deterministic template briefing is saved
+  instead and the dashboard says so.
+- **Logged like the forecasts.** `data/forecasts/ai_summary_log.jsonl` keeps
+  one entry per day with the facts, the text, its source (`llm` or
+  `template`), model, prompt version and token usage.
 
 ## Key modeling decisions
 
@@ -185,12 +211,13 @@ run_backtest.py            walk-forward evaluation (monthly retrain)
 src/day_ahead.py           data assembly, features, training, forecasting
 src/aemo_downloader.py     AEMO monthly CSV download with caching and retries
 src/aemo_pd7day.py         AEMO PD7DAY outlook: archive + live download, as-of-issue selection
+src/ai_summary.py          daily plain-English briefing via the Claude API, with a number check
 src/dashboard_data.py      data loading and analysis for the dashboard
 src/app.py                 Streamlit dashboard
 experiments/               the experiment behind each modeling decision (feasibility,
                            target transform, AEMO outlook, training window)
 .github/workflows/         daily pipeline
-data/forecasts/            latest forecast + forecast log (updated daily)
+data/forecasts/            latest forecast, forecast log and AI briefing log (updated daily)
 data/backtest/             walk-forward results
 
 main.py, src/pipeline.py,  v1: fixed-2025 pipeline, still run daily as a
@@ -213,6 +240,14 @@ Issue a fresh forecast for today and tomorrow (downloads AEMO and Open-Meteo dat
 
 ```bash
 python run_day_ahead.py
+```
+
+The AI briefing needs `ANTHROPIC_API_KEY` (a repository secret in GitHub
+Actions). Without it a template briefing is used. To regenerate the briefing
+for the latest saved forecast:
+
+```bash
+python -m src.ai_summary
 ```
 
 Backtest as if the forecast had been issued on a past morning (prints only):

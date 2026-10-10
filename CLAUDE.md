@@ -425,6 +425,21 @@ year, and on high-demand intervals (actual >= 10 GW, 867 spike intervals).
   minutes. Temperature is still required: if Open-Meteo is down for longer,
   that day's forecast is skipped (AEMO calls already fall back gracefully).
 
+### AI briefing on the dashboard (2026-10-10)
+Motivated by a job requirement on integrating LLMs into data pipelines
+programmatically. `src/ai_summary.py`, called at the end of the live
+`run_day_ahead.py` run; output `data/forecasts/ai_summary_log.jsonl`, shown
+at the top of the Outlook tab.
+- One Claude API call per day (`claude-opus-5-5`, effort low, JSON-schema
+  output, `fallbacks: "default"`). Input is only a dict of rounded facts
+  built in code (`build_facts`); risk level is a fixed rule (`risk_level`).
+- `unsupported_numbers` rejects any draft containing a number or HH:MM time
+  not in the facts (within rounding); the rejected draft stays in the log.
+- No key / API error / rejection -> deterministic `template_summary`,
+  `source: "template"`. Never fails the run (same policy as PD7DAY).
+- Requires the `ANTHROPIC_API_KEY` repository secret. Like forecasts,
+  briefings are not backfilled. Bump `PROMPT_VERSION` when the prompt changes.
+
 ## Not Yet Started / Future Candidates (Updated)
 
 Done since v2 started: dashboard switched to v2 (`src/app.py` +
