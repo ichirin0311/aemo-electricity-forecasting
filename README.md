@@ -7,6 +7,9 @@ flags when the market has stopped behaving like the data the models learned
 from. Runs end-to-end on GitHub Actions and a Streamlit dashboard.
 
 **[Live Dashboard](https://aemo-electricity-forecasting-xhtf7sj4xqjesgknueoqza.streamlit.app/)**
+(hosted on Streamlit Community Cloud's free tier, which puts the app to sleep
+when nobody has visited for a while; if you see the sleep page, click "Yes,
+get this app back up!" and it loads in about 30-60 seconds)
 
 ## What this project does
 
