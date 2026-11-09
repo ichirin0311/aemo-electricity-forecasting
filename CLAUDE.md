@@ -305,9 +305,13 @@ v1 (`main.py`, `src/train.py`) stays as is. v2 runs alongside it:
 ### Why v1's metrics don't carry over
 The v1 price model uses **same-interval actuals** (`totaldemand`,
 `availablegeneration`, `reserve_margin*`, actual temperature) and lags as short
-as 5 minutes (`rrp_volatility_1h`). None of these are known when a forecast is
-issued in advance, so v1's normal R2=0.5667 is closer to a nowcast. Its top
-3 features by gain are all of this kind.
+as 5 minutes (`rrp_volatility_1h`, `rrp_roll_max_6h`). None of these are known
+when a forecast is issued in advance, so v1's normal R2=0.5667 is closer to a
+nowcast. Its top 3 features by gain (`reserve_margin_ratio`, `rrp_lag_1h_t`,
+`rrp_volatility_1h`) are all unavailable for same-day or next-day forecasts;
+`rrp_lag_1h` would be legitimate only for horizons up to 1 hour. This was a
+missing forecast-horizon definition rather than target leakage (the target
+was not an input and the split was chronological).
 
 ### Forecast definition
 - Issued each morning. The nominal issue time is 06:00 market time (it

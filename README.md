@@ -95,8 +95,9 @@ evidence.*
 
 **1. My first model's headline numbers relied on information a real forecast
 wouldn't have.** The v1 price model (normal R² 0.57) used same-interval
-actual demand, available generation, reserve margin and prices up to 5
-minutes before. Its three most important features were all of this kind.
+actual demand, available generation and reserve margin, plus prices up to 5
+minutes before. Its three most important features (reserve margin ratio, the price 1 hour earlier, and price volatility up to 5 minutes earlier) could not be
+known when issuing a same-day or next-day forecast.
 Rebuilding it with only what is known when the forecast is issued gave a
 lower but honest baseline, which the results above are based on.
 
